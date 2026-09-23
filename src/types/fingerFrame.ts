@@ -16,6 +16,36 @@ export interface ColorPalette {
   colors: [string, string, string]; // [primary, secondary, darkBg]
 }
 
+export type PlayMode = 'wand' | 'frame' | 'stars' | 'hearts' | 'bubbles';
+
+export interface FlowerParticle {
+  id: string;
+  x: number;
+  y: number;
+  size: number;
+  targetSize: number;
+  rotation: number;
+  rotationSpeed: number;
+  petals: number;
+  color: string;
+  centerColor: string;
+  age: number; // in frames
+  maxAge: number;
+  alpha: number;
+  stemEndY?: number;
+  type: 'flower' | 'star' | 'heart' | 'sparkle' | 'bubble';
+  vx?: number;
+  vy?: number;
+}
+
+export interface WandTrailPoint {
+  x: number;
+  y: number;
+  timestamp: number;
+  color: string;
+  size: number;
+}
+
 export interface FrameStyle {
   id: string;
   name: string;
@@ -47,6 +77,7 @@ export type GestureStatus =
   | 'requesting'
   | 'no_hands'
   | 'one_hand'
+  | 'wand_active'
   | 'forming'
   | 'locked'
   | 'error';

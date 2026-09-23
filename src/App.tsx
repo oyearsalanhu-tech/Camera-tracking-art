@@ -1,18 +1,20 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Header } from './components/Header';
 import { CameraStage } from './components/CameraStage';
+import { ModeSelector } from './components/ModeSelector';
 import { StyleSelector } from './components/StyleSelector';
 import { ControlsBar } from './components/ControlsBar';
 import { GalleryDrawer } from './components/GalleryDrawer';
 import { TutorialModal } from './components/TutorialModal';
 import { STYLES, PALETTES } from './utils/stylesAndPalettes';
-import { GestureStatus, CapturedMedia } from './types/fingerFrame';
-import { setSoundEnabled, getSoundEnabled } from './utils/audioSynth';
-import { Download, Play, Image as ImageIcon } from 'lucide-react';
+import { GestureStatus, CapturedMedia, PlayMode } from './types/fingerFrame';
+import { setSoundEnabled } from './utils/audioSynth';
+import { Play } from 'lucide-react';
 
 export default function App() {
+  const [playMode, setPlayMode] = useState<PlayMode>('wand');
   const [gestureStatus, setGestureStatus] = useState<GestureStatus>('idle');
-  const [statusText, setStatusText] = useState<string>('Waiting for camera');
+  const [statusText, setStatusText] = useState<string>('Point finger like a wand');
   const [isClosed, setIsClosed] = useState<boolean>(false);
 
   const [currentStyleIndex, setCurrentStyleIndex] = useState<number>(0);
@@ -31,9 +33,10 @@ export default function App() {
   const [isGalleryOpen, setIsGalleryOpen] = useState<boolean>(false);
   const [isTutorialOpen, setIsTutorialOpen] = useState<boolean>(false);
 
-  // References to trigger snap and record from header or controls
+  // References to trigger snap, record, and flower clearing
   const triggerSnapRef = useRef<(() => void) | null>(null);
   const triggerRecordRef = useRef<(() => void) | null>(null);
+  const onClearFlowersRef = useRef<(() => void) | null>(null);
 
   // Status callback from camera solver
   const handleStatusChange = useCallback(
@@ -139,6 +142,7 @@ export default function App() {
         status={gestureStatus}
         statusText={statusText}
         isClosed={isClosed}
+        playMode={playMode}
         soundEnabled={soundOn}
         onToggleSound={handleToggleSound}
         onOpenTutorial={() => setIsTutorialOpen(true)}
@@ -149,6 +153,7 @@ export default function App() {
       {/* Main Interactive Stage */}
       <main className="flex-1 flex flex-col items-center justify-between min-h-0 w-full relative">
         <CameraStage
+          playMode={playMode}
           currentStyle={currentStyle}
           currentPalette={currentPalette}
           facing={facing}
@@ -165,11 +170,26 @@ export default function App() {
           setRecordingTime={setRecordingTime}
           triggerSnapRef={triggerSnapRef}
           triggerRecordRef={triggerRecordRef}
+          onClearFlowersRef={onClearFlowersRef}
         />
 
         {/* Bottom Interactive Dashboard */}
-        <div className="w-full bg-[#0d0c14]/90 backdrop-blur-md border-t border-purple-900/30 flex flex-col items-center z-10">
-          {/* Visual Style & Palette Pickers */}
+        <div className="w-full bg-[#0d0c14]/95 backdrop-blur-md border-t border-purple-900/30 flex flex-col items-center z-10 pb-1">
+          {/* Mode Selector (Flower Wand, Stars, Hearts, Bubbles, Finger Frame) */}
+          <ModeSelector
+            playMode={playMode}
+            onSelectMode={(mode) => {
+              setPlayMode(mode);
+              if (mode === 'frame') {
+                setStatusText('Bring fingertips together');
+              } else {
+                setStatusText('Move finger wand to bloom');
+              }
+            }}
+            onClearParticles={() => onClearFlowersRef.current?.()}
+          />
+
+          {/* Frame Style & Palette Pickers (Available in both modes for palettes, style for frame mode) */}
           <StyleSelector
             currentStyleIndex={currentStyleIndex}
             currentPaletteIndex={currentPaletteIndex}
@@ -199,10 +219,10 @@ export default function App() {
 
           {/* Quick Recent Captures Filmstrip (when gallery is closed) */}
           {capturedMedia.length > 0 && (
-            <div className="w-full px-4 pb-2 pt-1 flex items-center justify-between border-t border-purple-950/40">
-              <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-1">
+            <div className="w-full px-4 pb-1 pt-1 flex items-center justify-between border-t border-purple-950/40">
+              <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5">
                 <span className="text-[11px] font-mono text-purple-400 font-bold shrink-0">
-                  RECENT:
+                  CAPTURES:
                 </span>
                 {capturedMedia.slice(0, 5).map((item) => (
                   <div
