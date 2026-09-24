@@ -29,9 +29,11 @@ export const Header: React.FC<HeaderProps> = ({
     <header className="relative z-20 flex items-center justify-between px-3 py-2.5 sm:px-6 bg-[#0c0b12]/85 backdrop-blur-md border-b border-purple-900/30 select-none">
       {/* Brand title */}
       <div className="flex items-center gap-2.5">
-        <div className="relative flex items-center justify-center w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-gradient-to-tr from-pink-500 via-purple-500 to-cyan-400 p-[2px] shadow-lg shadow-pink-500/20">
+        <div className="relative flex items-center justify-center w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-gradient-to-tr from-cyan-400 via-purple-500 to-pink-500 p-[2px] shadow-lg shadow-cyan-500/20">
           <div className="w-full h-full bg-[#0d0c14] rounded-[10px] flex items-center justify-center">
-            {playMode === 'wand' ? (
+            {playMode === 'frame' ? (
+              <Sparkles className="w-4 h-4 text-cyan-400" />
+            ) : playMode === 'wand' ? (
               <Flower2 className="w-4 h-4 text-pink-400" />
             ) : (
               <Wand2 className="w-4 h-4 text-cyan-400" />
@@ -40,13 +42,13 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
         <div>
           <h1 className="text-sm sm:text-base font-extrabold tracking-tight text-white flex items-center gap-1.5">
-            <span>Flower Wand Garden</span>
-            <span className="hidden sm:inline-flex items-center text-[9px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-pink-500/10 text-pink-400 border border-pink-500/20">
-              Finger Track
+            <span>Finger Frame Lens</span>
+            <span className="hidden sm:inline-flex items-center text-[9px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-400/30">
+              Reel Focus
             </span>
           </h1>
           <p className="hidden md:block text-[11px] text-purple-300/60 font-medium">
-            Finger tracking shape formation & living flower garden
+            Hands apart finger tracking • 3D wireframe grid & neon contour
           </p>
         </div>
       </div>

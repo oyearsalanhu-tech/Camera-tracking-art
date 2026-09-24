@@ -1,6 +1,6 @@
 import React from 'react';
 import { PlayMode } from '../types/fingerFrame';
-import { Flower2, Frame, Star, Heart, Sparkles, Wand2 } from 'lucide-react';
+import { Flower2, Frame, Star, Heart, Sparkles, Trash2, Zap } from 'lucide-react';
 
 interface ModeSelectorProps {
   playMode: PlayMode;
@@ -19,10 +19,19 @@ export const ModeSelector: React.FC<ModeSelectorProps> = ({
     icon: React.ReactNode;
     color: string;
     description: string;
+    badge?: string;
   }> = [
     {
+      id: 'frame',
+      label: 'Finger Frame',
+      icon: <Frame className="w-4 h-4 text-cyan-400" />,
+      color: 'from-cyan-500/25 to-fuchsia-500/25 text-cyan-200 border-cyan-400',
+      description: 'Hands apart to form floating 3D wireframe / neon screen (Reel)',
+      badge: 'REEL FOCUS',
+    },
+    {
       id: 'wand',
-      label: 'Flower Garden',
+      label: 'Flower Wand',
       icon: <Flower2 className="w-4 h-4 text-pink-400" />,
       color: 'from-pink-500/20 to-rose-500/20 text-pink-300 border-pink-400',
       description: 'Draw with your fingertip to bloom living flowers',
@@ -48,50 +57,44 @@ export const ModeSelector: React.FC<ModeSelectorProps> = ({
       color: 'from-cyan-500/20 to-blue-500/20 text-cyan-300 border-cyan-400',
       description: 'Blow floating iridescent soap bubbles',
     },
-    {
-      id: 'frame',
-      label: 'Finger Frame',
-      icon: <Frame className="w-4 h-4 text-purple-400" />,
-      color: 'from-purple-500/20 to-fuchsia-500/20 text-purple-300 border-purple-400',
-      description: 'Connect two hands into an L-frame',
-    },
   ];
 
   return (
-    <div className="w-full flex items-center justify-between gap-2 px-3 py-1.5 select-none">
-      {/* Mode selection buttons */}
-      <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
-        <span className="text-[11px] font-mono font-bold text-purple-300/60 uppercase mr-1 hidden sm:inline">
-          INTERACTION:
-        </span>
-        {modes.map((m) => {
-          const isSelected = playMode === m.id;
+    <div className="w-full flex items-center justify-between px-3 pt-2 pb-1 gap-2 overflow-x-auto no-scrollbar">
+      <div className="flex items-center gap-1.5 shrink-0">
+        {modes.map((mode) => {
+          const isSelected = playMode === mode.id;
           return (
             <button
-              key={m.id}
-              onClick={() => onSelectMode(m.id)}
-              title={m.description}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-all duration-200 border ${
+              key={mode.id}
+              onClick={() => onSelectMode(mode.id)}
+              title={mode.description}
+              className={`relative flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 border cursor-pointer ${
                 isSelected
-                  ? `bg-gradient-to-r ${m.color} shadow-md shadow-pink-500/10 scale-105`
-                  : 'bg-[#151320] text-purple-200/60 border-purple-900/40 hover:bg-[#1f1c30] hover:text-white'
+                  ? `bg-gradient-to-r ${mode.color} shadow-[0_0_15px_rgba(0,240,255,0.25)] scale-[1.03]`
+                  : 'bg-[#141220] text-purple-200/60 border-purple-900/40 hover:bg-[#1e1a30] hover:text-white hover:border-purple-700/60'
               }`}
             >
-              {m.icon}
-              <span>{m.label}</span>
+              {mode.icon}
+              <span>{mode.label}</span>
+              {mode.badge && (
+                <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-cyan-500/30 text-cyan-300 border border-cyan-400/40 tracking-wider">
+                  {mode.badge}
+                </span>
+              )}
             </button>
           );
         })}
       </div>
 
-      {/* Clear Garden Button (for wand modes) */}
       {playMode !== 'frame' && (
         <button
           onClick={onClearParticles}
-          title="Clear all blooming flowers and sparkles"
-          className="text-[11px] font-medium text-purple-400 hover:text-pink-300 hover:bg-pink-950/30 px-2.5 py-1 rounded-full border border-purple-800/40 shrink-0 transition-colors"
+          title="Clear all blooming flowers and particles"
+          className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-red-950/30 text-red-300 border border-red-800/40 hover:bg-red-900/50 transition-all shrink-0 active:scale-95"
         >
-          Clear Canvas
+          <Trash2 className="w-3.5 h-3.5 text-red-400" />
+          <span className="hidden sm:inline">Clear Canvas</span>
         </button>
       )}
     </div>

@@ -2,19 +2,22 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Header } from './components/Header';
 import { CameraStage } from './components/CameraStage';
 import { ModeSelector } from './components/ModeSelector';
+import { ConditionSelector } from './components/ConditionSelector';
 import { StyleSelector } from './components/StyleSelector';
 import { ControlsBar } from './components/ControlsBar';
 import { GalleryDrawer } from './components/GalleryDrawer';
 import { TutorialModal } from './components/TutorialModal';
 import { STYLES, PALETTES } from './utils/stylesAndPalettes';
-import { GestureStatus, CapturedMedia, PlayMode } from './types/fingerFrame';
+import { GestureStatus, CapturedMedia, PlayMode, FrameCondition } from './types/fingerFrame';
 import { setSoundEnabled } from './utils/audioSynth';
 import { Play } from 'lucide-react';
 
 export default function App() {
-  const [playMode, setPlayMode] = useState<PlayMode>('wand');
+  const [playMode, setPlayMode] = useState<PlayMode>('frame');
+  const [conditionMode, setConditionMode] = useState<'auto' | 'upside_down' | 'apart_quad' | 'pinch_attached'>('auto');
+  const [activeCondition, setActiveCondition] = useState<FrameCondition>('none');
   const [gestureStatus, setGestureStatus] = useState<GestureStatus>('idle');
-  const [statusText, setStatusText] = useState<string>('Point finger like a wand');
+  const [statusText, setStatusText] = useState<string>('Raise hands to frame');
   const [isClosed, setIsClosed] = useState<boolean>(false);
 
   const [currentStyleIndex, setCurrentStyleIndex] = useState<number>(0);
@@ -162,6 +165,8 @@ export default function App() {
           showSkeleton={showSkeleton}
           micEnabled={micEnabled}
           photoTimer={photoTimer}
+          conditionMode={conditionMode}
+          onConditionChange={(cond) => setActiveCondition(cond)}
           onStatusChange={handleStatusChange}
           onMediaCaptured={handleMediaCaptured}
           isRecording={isRecording}
@@ -175,19 +180,28 @@ export default function App() {
 
         {/* Bottom Interactive Dashboard */}
         <div className="w-full bg-[#0d0c14]/95 backdrop-blur-md border-t border-purple-900/30 flex flex-col items-center z-10 pb-1">
-          {/* Mode Selector (Flower Wand, Stars, Hearts, Bubbles, Finger Frame) */}
+          {/* Mode Selector (Finger Frame, Flower Wand, Stars, Hearts, Bubbles) */}
           <ModeSelector
             playMode={playMode}
             onSelectMode={(mode) => {
               setPlayMode(mode);
               if (mode === 'frame') {
-                setStatusText('Bring fingertips together');
+                setStatusText('Raise hands to frame');
               } else {
                 setStatusText('Move finger wand to bloom');
               }
             }}
             onClearParticles={() => onClearFlowersRef.current?.()}
           />
+
+          {/* Condition Selector for Finger Frame Mode (Upside Down, Pinch Attached, Fingers Apart) */}
+          {playMode === 'frame' && (
+            <ConditionSelector
+              conditionMode={conditionMode}
+              onSelectConditionMode={setConditionMode}
+              activeCondition={activeCondition}
+            />
+          )}
 
           {/* Frame Style & Palette Pickers (Available in both modes for palettes, style for frame mode) */}
           <StyleSelector

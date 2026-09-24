@@ -8,10 +8,13 @@ import {
   PlayMode,
   FlowerParticle,
   WandTrailPoint,
+  FrameCondition,
 } from '../types/fingerFrame';
 import {
   playShutterSound,
   playFrameLockSound,
+  playPinchSnapSound,
+  playInvertChord,
   playRecordStart,
   playRecordStop,
   playCountdownTick,
@@ -19,7 +22,7 @@ import {
   playSparkleSound,
 } from '../utils/audioSynth';
 import confetti from 'canvas-confetti';
-import { Camera, AlertCircle, Sparkles, RefreshCw, Wand2, Flower2, Zap } from 'lucide-react';
+import { Camera, AlertCircle, Sparkles, RefreshCw, Wand2, Flower2, Zap, Frame } from 'lucide-react';
 
 interface MediaPipeHandsResults {
   multiHandLandmarks?: Array<Array<{ x: number; y: number; z?: number }>>;
@@ -35,6 +38,8 @@ interface CameraStageProps {
   showSkeleton: boolean;
   micEnabled: boolean;
   photoTimer: number;
+  conditionMode?: 'auto' | 'upside_down' | 'apart_quad' | 'pinch_attached';
+  onConditionChange?: (condition: FrameCondition, isAttached: boolean) => void;
   onStatusChange: (status: GestureStatus, text: string, isClosed: boolean) => void;
   onMediaCaptured: (blob: Blob, type: 'photo' | 'video', duration?: number) => void;
   isRecording: boolean;
@@ -44,6 +49,21 @@ interface CameraStageProps {
   triggerSnapRef: React.MutableRefObject<(() => void) | null>;
   triggerRecordRef: React.MutableRefObject<(() => void) | null>;
   onClearFlowersRef?: React.MutableRefObject<(() => void) | null>;
+}
+
+// Compute line segment intersection
+function getLineIntersection(p1: Point, p2: Point, p3: Point, p4: Point): Point | null {
+  const d = (p1.x - p2.x) * (p3.y - p4.y) - (p1.y - p2.y) * (p3.x - p4.x);
+  if (Math.abs(d) < 0.0001) return null;
+  const t = ((p1.x - p3.x) * (p3.y - p4.y) - (p1.y - p3.y) * (p3.x - p4.x)) / d;
+  const u = -((p1.x - p2.x) * (p1.y - p3.y) - (p1.y - p2.y) * (p1.x - p3.x)) / d;
+  if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
+    return {
+      x: p1.x + t * (p2.x - p1.x),
+      y: p1.y + t * (p2.y - p1.y),
+    };
+  }
+  return null;
 }
 
 export const CameraStage: React.FC<CameraStageProps> = ({
@@ -56,6 +76,8 @@ export const CameraStage: React.FC<CameraStageProps> = ({
   showSkeleton,
   micEnabled,
   photoTimer,
+  conditionMode = 'auto',
+  onConditionChange,
   onStatusChange,
   onMediaCaptured,
   isRecording,
@@ -88,15 +110,31 @@ export const CameraStage: React.FC<CameraStageProps> = ({
   // Tracking state refs for render loop
   const quadRef = useRef<Point[] | null>(null);
   const isClosedRef = useRef<boolean>(false);
+  const conditionRef = useRef<FrameCondition>('none');
+  const prevConditionRef = useRef<FrameCondition>('none');
   const lastHandsRef = useRef<Array<Array<{ x: number; y: number }>>>([]);
   const missingRef = useRef<number>(0);
   const busyRef = useRef<boolean>(false);
   const reqAnimRef = useRef<number | null>(null);
   const fpsRef = useRef<number>(60);
   const lastFrameTimeRef = useRef<number>(performance.now());
-  const cameraUtilityRef = useRef<any>(null);
 
-  // Synchronized refs so the render loop always has latest props
+  // Tracked fingertips exclusively: Left Index, Left Thumb, Right Index, Right Thumb
+  const trackedFingersRef = useRef<{
+    leftIndex?: Point;
+    leftThumb?: Point;
+    rightIndex?: Point;
+    rightThumb?: Point;
+    centerPt?: Point | null;
+    isAttached?: boolean;
+    condition: FrameCondition;
+    leftInverted?: boolean;
+    rightInverted?: boolean;
+  }>({
+    condition: 'none',
+  });
+
+  // Synchronized refs
   const playModeRef = useRef(playMode);
   playModeRef.current = playMode;
 
@@ -117,6 +155,12 @@ export const CameraStage: React.FC<CameraStageProps> = ({
 
   const showSkeletonRef = useRef(showSkeleton);
   showSkeletonRef.current = showSkeleton;
+
+  const conditionModeRef = useRef(conditionMode);
+  conditionModeRef.current = conditionMode;
+
+  const onConditionChangeRef = useRef(onConditionChange);
+  onConditionChangeRef.current = onConditionChange;
 
   // Clear flower particles trigger
   const clearFlowers = useCallback(() => {
@@ -139,29 +183,34 @@ export const CameraStage: React.FC<CameraStageProps> = ({
       if (typeof window !== 'undefined' && (window as any).Hands) {
         try {
           hands = new (window as any).Hands({
-            locateFile: (file: string) =>
-              `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`,
+            locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
           });
+
           hands.setOptions({
-            maxNumHands: 4, // Support multiple hands like Flower Wand Garden!
+            maxNumHands: 2,
             modelComplexity: 1,
-            minDetectionConfidence: 0.5,
-            minTrackingConfidence: 0.5,
+            minDetectionConfidence: 0.55,
+            minTrackingConfidence: 0.55,
           });
+
           hands.onResults((results: MediaPipeHandsResults) => {
-            lastHandsRef.current = results.multiHandLandmarks || [];
+            if (results.multiHandLandmarks) {
+              lastHandsRef.current = results.multiHandLandmarks;
+            } else {
+              lastHandsRef.current = [];
+            }
             processHandResults();
+            busyRef.current = false;
           });
+
           handsInstanceRef.current = hands;
         } catch (e) {
-          console.error('Error creating MediaPipe Hands instance:', e);
+          console.error('MediaPipe Hands init error:', e);
         }
       }
     };
 
-    if ((window as any).Hands) {
-      initHands();
-    } else {
+    if (!(window as any).Hands) {
       const interval = setInterval(() => {
         if ((window as any).Hands) {
           clearInterval(interval);
@@ -169,6 +218,8 @@ export const CameraStage: React.FC<CameraStageProps> = ({
         }
       }, 100);
       return () => clearInterval(interval);
+    } else {
+      initHands();
     }
 
     return () => {
@@ -183,8 +234,8 @@ export const CameraStage: React.FC<CameraStageProps> = ({
   }, []);
 
   // Process Hand Landmarks:
-  // 1. In Wand / Stars / Hearts / Bubbles mode: track index fingertips and spawn magical blooms
-  // 2. In Frame mode: compute finger-frame shape enclosure
+  // FOCUS ONLY ON FIRST FINGER (INDEX TIP, landmark 8) AND THUMB FINGER (THUMB TIP, landmark 4)
+  // DETECTS UPSIDE-DOWN ORIENTATION (VIRAL TREND SCREENSHOT) & PINCH ATTACHED CONDITION
   const processHandResults = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -194,11 +245,11 @@ export const CameraStage: React.FC<CameraStageProps> = ({
 
     if (hands.length === 0) {
       missingRef.current++;
-      if (missingRef.current > 4) {
+      if (missingRef.current > 6) {
         if (mode === 'frame') {
-          setClosedState(false, 'no_hands', 'Show both hands');
+          setClosedState(false, 'no_hands', 'Raise both hands to frame');
         } else {
-          onStatusChange('no_hands', 'Show your hand to draw flowers', false);
+          onStatusChange('no_hands', 'Show your hand to draw', false);
         }
       }
       return;
@@ -209,221 +260,455 @@ export const CameraStage: React.FC<CameraStageProps> = ({
     const mx = (l: { x: number }) => (isUserFacing ? 1 - l.x : l.x) * canvas.width;
     const my = (l: { y: number }) => l.y * canvas.height;
 
-    // --- WAND GARDEN & PARTICLES MODES ---
-    if (mode !== 'frame') {
-      onStatusChange('wand_active', `✨ ${hands.length} Hand${hands.length > 1 ? 's' : ''} Wand Active`, true);
+    // ========================================================
+    // 1. REEL FINGER FRAME SOLVER: ONLY FIRST FINGER & THUMB!
+    // ========================================================
+    if (mode === 'frame') {
+      const P = (l: { x: number; y: number }) => ({ x: mx(l), y: my(l) });
+      const dist = (a: Point, b: Point): number => Math.hypot(a.x - b.x, a.y - b.y);
+      const mid = (a: Point, b: Point): Point => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
 
-      // Track index fingertip (landmark 8) for each hand
-      const now = performance.now();
-      hands.forEach((hand, hIdx) => {
-        const indexTip = hand[8];
-        const thumbTip = hand[4];
-        if (!indexTip) return;
+      // CASE A: Two Hands Raised
+      if (hands.length >= 2) {
+        // Sort hands left to right by screen X
+        const h0 = hands[0];
+        const h1 = hands[1];
+        const h0x = mx(h0[9] || h0[0]);
+        const h1x = mx(h1[9] || h1[0]);
 
-        const tipX = mx(indexTip);
-        const tipY = my(indexTip);
+        const leftHand = h0x < h1x ? h0 : h1;
+        const rightHand = h0x < h1x ? h1 : h0;
 
-        // Add to magic trail
-        trailsRef.current.push({
-          x: tipX,
-          y: tipY,
-          timestamp: now,
-          color: paletteRef.current.colors[hIdx % 2],
-          size: 14,
-        });
+        // ONLY FOCUS ON FIRST FINGER (Index Tip 8) AND THUMB FINGER (Thumb Tip 4)
+        const lIndex = P(leftHand[8]);
+        const lThumb = P(leftHand[4]);
+        const rIndex = P(rightHand[8]);
+        const rThumb = P(rightHand[4]);
 
-        // Spawn flower/star/heart when moving or gently pausing
-        const lastPos = lastSpawnPosRef.current[hIdx];
-        const dist = lastPos ? Math.hypot(tipX - lastPos.x, tipY - lastPos.y) : 999;
-        const timeDelta = lastPos ? now - lastPos.time : 999;
+        // Hand orientation check:
+        // A hand is upside down if the index finger is pointing down (higher Y coordinate than thumb or wrist)
+        const lInverted = lIndex.y > lThumb.y + 12 || (leftHand[8].y > leftHand[0].y + 0.05);
+        const rInverted = rIndex.y > rThumb.y + 12 || (rightHand[8].y > rightHand[0].y + 0.05);
 
-        // If moved enough or periodically held
-        if (dist > 28 || (dist > 8 && timeDelta > 160)) {
-          lastSpawnPosRef.current[hIdx] = { x: tipX, y: tipY, time: now };
+        // Check if fingers are attached to each other (pinch condition between hands)
+        const d_LIndex_RThumb = dist(lIndex, rThumb);
+        const d_LThumb_RIndex = dist(lThumb, rIndex);
+        const d_LIndex_RIndex = dist(lIndex, rIndex);
+        const d_LThumb_RThumb = dist(lThumb, rThumb);
+        const d_LPinch = dist(lIndex, lThumb);
+        const d_RPinch = dist(rIndex, rThumb);
 
-          // Choose colors
-          const pal = paletteRef.current.colors;
-          const flowerColors = [
-            '#ff5bbd', '#ff9a3c', '#00f0ff', '#ffe14d', '#b6ff3c', '#ff3b4e', '#a855f7', '#38bdf8'
-          ];
-          const chosenColor = flowerColors[Math.floor(Math.random() * flowerColors.length)];
+        // Attachment condition: fingers touching or dual-hand pinch
+        const isDualPinch =
+          (d_LIndex_RThumb < 58 && d_LThumb_RIndex < 58) ||
+          (d_LIndex_RThumb < 45 || d_LThumb_RIndex < 45) ||
+          (d_LIndex_RIndex < 45 && d_LThumb_RThumb < 45);
 
-          // Spawn particle based on mode
-          const pType = mode === 'stars'
-            ? 'star'
-            : mode === 'hearts'
-            ? 'heart'
-            : mode === 'bubbles'
-            ? 'bubble'
-            : 'flower';
+        const isSelfPinchBoth = d_LPinch < 42 && d_RPinch < 42 && dist(lIndex, rIndex) < 240;
+        const isAttached = isDualPinch || isSelfPinchBoth;
 
-          particlesRef.current.push({
-            id: `p-${Date.now()}-${Math.random()}`,
-            x: tipX,
-            y: tipY,
-            size: 4,
-            targetSize: Math.random() * 26 + 32, // lovely bloom size
-            rotation: Math.random() * Math.PI * 2,
-            rotationSpeed: (Math.random() - 0.5) * 0.04,
-            petals: Math.floor(Math.random() * 3) + 5, // 5 to 7 petals
-            color: chosenColor,
-            centerColor: '#fff9a6',
-            age: 0,
-            maxAge: 320, // lasts ~6 seconds
-            alpha: 1,
-            stemEndY: tipY + Math.random() * 40 + 20,
-            type: pType,
-            vx: (Math.random() - 0.5) * 0.8,
-            vy: pType === 'bubble' ? - (Math.random() * 1.5 + 0.5) : (Math.random() - 0.5) * 0.4,
-          });
+        // Determine active condition
+        let detectedCondition: FrameCondition = 'apart_quad';
+        if (isAttached) {
+          detectedCondition = 'pinch_attached';
+        } else if (lInverted !== rInverted || (lInverted && rInverted)) {
+          // Exactly matching Screenshot_20260924_070735_YouTube.jpg: one hand upside down!
+          detectedCondition = 'upside_down';
+        } else {
+          detectedCondition = 'apart_quad';
+        }
 
-          // Also sprinkle tiny sparkles
-          for (let s = 0; s < 3; s++) {
-            particlesRef.current.push({
-              id: `sp-${Date.now()}-${Math.random()}`,
-              x: tipX + (Math.random() - 0.5) * 20,
-              y: tipY + (Math.random() - 0.5) * 20,
-              size: 2,
-              targetSize: Math.random() * 10 + 6,
-              rotation: Math.random() * Math.PI,
-              rotationSpeed: 0.1,
-              petals: 4,
-              color: '#ffffff',
-              centerColor: pal[0],
-              age: 0,
-              maxAge: 45,
-              alpha: 1,
-              type: 'sparkle',
-              vx: (Math.random() - 0.5) * 2,
-              vy: (Math.random() - 0.5) * 2 - 1,
-            });
+        const activeCond =
+          conditionModeRef.current && conditionModeRef.current !== 'auto'
+            ? conditionModeRef.current
+            : detectedCondition;
+
+        // Sound triggers on state change
+        if (activeCond !== prevConditionRef.current) {
+          if (activeCond === 'pinch_attached') {
+            playPinchSnapSound();
+          } else if (activeCond === 'upside_down') {
+            playInvertChord();
+          } else if (activeCond === 'apart_quad') {
+            playFrameLockSound();
           }
-
-          // Sound effect
-          if (pType === 'flower') {
-            playBloomSound();
-          } else {
-            playSparkleSound();
-          }
-
-          // Limit max particles to keep 60fps buttery smooth
-          if (particlesRef.current.length > 120) {
-            particlesRef.current.splice(0, 15);
+          prevConditionRef.current = activeCond;
+          conditionRef.current = activeCond;
+          if (onConditionChangeRef.current) {
+            onConditionChangeRef.current(activeCond, isAttached);
           }
         }
+
+        let targetQuad: Point[] = [];
+        let centerPt: Point | null = null;
+
+        // ==========================================
+        // CONDITION 1: UPSIDE-DOWN (VIRAL TREND SHORT)
+        // ==========================================
+        if (activeCond === 'upside_down') {
+          // As shown in YouTube Short screenshot:
+          // Left hand upright: Index is Top-Left, Thumb is Bottom-Left
+          // Right hand upside-down: Thumb is Top-Right, Index is Bottom-Right
+          const topLeft = !lInverted ? lIndex : lThumb;
+          const bottomLeft = !lInverted ? lThumb : lIndex;
+          const topRight = rInverted ? rThumb : rIndex;
+          const bottomRight = rInverted ? rIndex : rThumb;
+
+          centerPt = getLineIntersection(topLeft, bottomRight, bottomLeft, topRight);
+
+          targetQuad = [topLeft, topRight, bottomRight, bottomLeft];
+
+          trackedFingersRef.current = {
+            leftIndex: lIndex,
+            leftThumb: lThumb,
+            rightIndex: rIndex,
+            rightThumb: rThumb,
+            centerPt,
+            isAttached: false,
+            condition: 'upside_down',
+            leftInverted: lInverted,
+            rightInverted: rInverted,
+          };
+
+          if (quadRef.current && isClosedRef.current) {
+            quadRef.current = quadRef.current.map((q, idx) => ({
+              x: q.x + (targetQuad[idx].x - q.x) * 0.55,
+              y: q.y + (targetQuad[idx].y - q.y) * 0.55,
+            }));
+          } else {
+            quadRef.current = targetQuad;
+          }
+
+          setClosedState(
+            true,
+            'locked',
+            `⏳ VIRAL TREND: Upside-Down Inverted Frame`
+          );
+          return;
+        }
+
+        // ==========================================
+        // CONDITION 2: PINCH ATTACHED (FINGERS TOUCHING)
+        // ==========================================
+        if (activeCond === 'pinch_attached') {
+          // Calculate pinch contact points
+          const pinchTop =
+            d_LIndex_RThumb < 65
+              ? mid(lIndex, rThumb)
+              : d_LIndex_RIndex < 65
+              ? mid(lIndex, rIndex)
+              : lIndex;
+
+          const pinchBottom =
+            d_LThumb_RIndex < 65
+              ? mid(lThumb, rIndex)
+              : d_LThumb_RThumb < 65
+              ? mid(lThumb, rThumb)
+              : lThumb;
+
+          const span = Math.max(dist(pinchTop, pinchBottom), 90);
+          const halfSpan = span * 0.45;
+
+          targetQuad = [
+            { x: pinchTop.x - halfSpan, y: pinchTop.y },
+            { x: pinchTop.x + halfSpan, y: pinchTop.y },
+            { x: pinchBottom.x + halfSpan, y: pinchBottom.y },
+            { x: pinchBottom.x - halfSpan, y: pinchBottom.y },
+          ];
+
+          trackedFingersRef.current = {
+            leftIndex: lIndex,
+            leftThumb: lThumb,
+            rightIndex: rIndex,
+            rightThumb: rThumb,
+            isAttached: true,
+            condition: 'pinch_attached',
+            leftInverted: lInverted,
+            rightInverted: rInverted,
+          };
+
+          if (quadRef.current && isClosedRef.current) {
+            quadRef.current = quadRef.current.map((q, idx) => ({
+              x: q.x + (targetQuad[idx].x - q.x) * 0.6,
+              y: q.y + (targetQuad[idx].y - q.y) * 0.6,
+            }));
+          } else {
+            quadRef.current = targetQuad;
+          }
+
+          setClosedState(
+            true,
+            'locked',
+            `🔒 PINCH ATTACHED: Dual Hand Pinch Locked!`
+          );
+          return;
+        }
+
+        // ==========================================
+        // CONDITION 3: FINGERS APART QUAD (UPRIGHT)
+        // ==========================================
+        targetQuad = [
+          lIndex, // Top-Left
+          rIndex, // Top-Right
+          rThumb, // Bottom-Right
+          lThumb, // Bottom-Left
+        ];
+
+        trackedFingersRef.current = {
+          leftIndex: lIndex,
+          leftThumb: lThumb,
+          rightIndex: rIndex,
+          rightThumb: rThumb,
+          isAttached: false,
+          condition: 'apart_quad',
+          leftInverted: lInverted,
+          rightInverted: rInverted,
+        };
+
+        if (quadRef.current && isClosedRef.current) {
+          quadRef.current = quadRef.current.map((q, idx) => ({
+            x: q.x + (targetQuad[idx].x - q.x) * 0.55,
+            y: q.y + (targetQuad[idx].y - q.y) * 0.55,
+          }));
+        } else {
+          quadRef.current = targetQuad;
+        }
+
+        const spanPx = Math.round(Math.abs(rIndex.x - lIndex.x));
+        setClosedState(
+          true,
+          'locked',
+          `✨ FINGERS APART: Quad Frame (${spanPx}px)`
+        );
+        return;
+      }
+
+      // CASE B: Single Hand Viewfinder (Single L-pose)
+      if (hands.length === 1) {
+        const h = hands[0];
+        const iTip = P(h[8]); // index tip (first finger)
+        const tTip = P(h[4]); // thumb tip (thumb finger)
+        const corner = mid(P(h[2]), P(h[5])); // corner of L
+        const span = dist(iTip, tTip);
+
+        // Check if single hand is pinching (index touches thumb)
+        const isSinglePinch = span < 40;
+
+        if (isSinglePinch) {
+          const pinchPt = mid(iTip, tTip);
+          const r = 55;
+          const singleTarget: Point[] = [
+            { x: pinchPt.x - r, y: pinchPt.y - r },
+            { x: pinchPt.x + r, y: pinchPt.y - r },
+            { x: pinchPt.x + r, y: pinchPt.y + r },
+            { x: pinchPt.x - r, y: pinchPt.y + r },
+          ];
+
+          trackedFingersRef.current = {
+            leftIndex: iTip,
+            leftThumb: tTip,
+            isAttached: true,
+            condition: 'pinch_attached',
+          };
+          conditionRef.current = 'pinch_attached';
+
+          if (quadRef.current && isClosedRef.current) {
+            quadRef.current = quadRef.current.map((q, idx) => ({
+              x: q.x + (singleTarget[idx].x - q.x) * 0.55,
+              y: q.y + (singleTarget[idx].y - q.y) * 0.55,
+            }));
+          } else {
+            quadRef.current = singleTarget;
+          }
+
+          setClosedState(true, 'locked', '👌 1-Hand Pinch Aperture Locked');
+          return;
+        }
+
+        if (span > 50) {
+          const opposite: Point = {
+            x: iTip.x + (tTip.x - corner.x),
+            y: iTip.y + (tTip.y - corner.y),
+          };
+
+          const singleTarget: Point[] = [
+            iTip.y < corner.y ? iTip : corner,
+            opposite,
+            tTip,
+            corner,
+          ];
+
+          trackedFingersRef.current = {
+            leftIndex: iTip,
+            leftThumb: tTip,
+            isAttached: false,
+            condition: 'single_l',
+          };
+          conditionRef.current = 'single_l';
+
+          if (quadRef.current && isClosedRef.current) {
+            quadRef.current = quadRef.current.map((q, idx) => ({
+              x: q.x + (singleTarget[idx].x - q.x) * 0.5,
+              y: q.y + (singleTarget[idx].y - q.y) * 0.5,
+            }));
+          } else {
+            quadRef.current = singleTarget;
+          }
+
+          setClosedState(true, 'one_hand', '👆 1-Hand Viewfinder (Raise 2nd hand to expand)');
+          return;
+        }
+
+        setClosedState(false, 'one_hand', 'Open index & thumb in L-shape');
+        return;
+      }
+    }
+
+    // ========================================================
+    // 2. WAND & PARTICLE DRAWING MODES
+    // ========================================================
+    onStatusChange('wand_active', `✨ ${hands.length} Hand${hands.length > 1 ? 's' : ''} Wand Active`, true);
+
+    const now = performance.now();
+    hands.forEach((hand, hIdx) => {
+      const tip = hand[8]; // Index fingertip
+      if (!tip) return;
+
+      const px = mx(tip);
+      const py = my(tip);
+
+      // Add to light trail
+      trailsRef.current.push({
+        x: px,
+        y: py,
+        timestamp: now,
+        color: paletteRef.current.colors[hIdx % paletteRef.current.colors.length],
+        size: 9,
       });
-      return;
-    }
 
-    // --- FINGER FRAME ENCLOSURE GESTURE SOLVER ---
-    if (hands.length < 2) {
-      setClosedState(false, 'one_hand', 'Show second hand to frame');
-      return;
-    }
+      // Spawn garden particles
+      const lastSpawn = lastSpawnPosRef.current[hIdx];
+      const distTraveled = lastSpawn ? Math.hypot(px - lastSpawn.x, py - lastSpawn.y) : 999;
+      const timeElapsed = lastSpawn ? now - lastSpawn.time : 999;
 
-    const P = (l: { x: number; y: number }) => ({ x: mx(l), y: my(l) });
-    const mid = (a: Point, b: Point): Point => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
-    const dist = (a: Point, b: Point): number => Math.hypot(a.x - b.x, a.y - b.y);
+      if (distTraveled > 24 || timeElapsed > 220) {
+        lastSpawnPosRef.current[hIdx] = { x: px, y: py, time: now };
+        spawnParticle(px, py, mode);
+      }
+    });
 
-    // Hand A & Hand B L-corners (MCP 2 thumb joint, MCP 5 index joint)
-    const [A, B] = [hands[0], hands[1]].map((h) => ({
-      v: mid(P(h[2]), P(h[5])), // corner of L
-      t: P(h[4]), // thumb tip
-      i: P(h[8]), // index tip
-    }));
-
-    const diag = dist(A.v, B.v);
-
-    let p1: [Point, Point], p2: [Point, Point];
-    if (dist(A.t, B.t) + dist(A.i, B.i) <= dist(A.t, B.i) + dist(A.i, B.t)) {
-      p1 = [A.t, B.t];
-      p2 = [A.i, B.i];
-    } else {
-      p1 = [A.t, B.i];
-      p2 = [A.i, B.t];
-    }
-
-    const gap = Math.max(dist(...p1), dist(...p2));
-    const c1 = mid(...p1);
-    const c2 = mid(...p2);
-
-    const target: Point[] = [A.v, c1, B.v, c2];
-
-    const isSeparated = diag > canvas.width * 0.12;
-    const isTouching = gap < diag * 0.52;
-    const isFrameClosed = isSeparated && isTouching;
-
-    if (quadRef.current && isClosedRef.current) {
-      quadRef.current = quadRef.current.map((q, idx) => ({
-        x: q.x + (target[idx].x - q.x) * 0.58,
-        y: q.y + (target[idx].y - q.y) * 0.58,
-      }));
-    } else {
-      quadRef.current = target;
-    }
-
-    if (isFrameClosed) {
-      setClosedState(true, 'locked', '✨ Frame Active!');
-    } else {
-      setClosedState(false, 'forming', 'Bring fingertips together');
+    if (trailsRef.current.length > 180) {
+      trailsRef.current = trailsRef.current.slice(-180);
     }
   }, [onStatusChange]);
 
-  const setClosedState = (
-    closed: boolean,
-    status: GestureStatus,
-    statusText: string
-  ) => {
+  // Helper to spawn a flower/sparkle particle
+  const spawnParticle = (x: number, y: number, mode: PlayMode) => {
+    const palette = paletteRef.current;
+    const colors = [
+      palette.colors[0],
+      palette.colors[1],
+      '#ff2bd6',
+      '#00f0ff',
+      '#ffe14d',
+      '#ff79b0',
+    ];
+    const color = colors[Math.floor(Math.random() * colors.length)];
+
+    let pType: FlowerParticle['type'] = 'flower';
+    if (mode === 'stars') pType = 'star';
+    else if (mode === 'hearts') pType = 'heart';
+    else if (mode === 'bubbles') pType = 'bubble';
+    else pType = Math.random() > 0.3 ? 'flower' : 'sparkle';
+
+    const p: FlowerParticle = {
+      id: Math.random().toString(36).substr(2, 9),
+      x: x + (Math.random() - 0.5) * 12,
+      y: y + (Math.random() - 0.5) * 12,
+      size: 4,
+      targetSize: Math.random() * 22 + 18,
+      rotation: Math.random() * Math.PI * 2,
+      rotationSpeed: (Math.random() - 0.5) * 0.04,
+      petals: Math.floor(Math.random() * 3) + 5,
+      color,
+      centerColor: '#fffbdf',
+      age: 0,
+      maxAge: Math.floor(Math.random() * 80) + 160,
+      alpha: 1,
+      stemEndY: y + Math.random() * 35 + 20,
+      type: pType,
+      vx: (Math.random() - 0.5) * 0.8,
+      vy: pType === 'bubble' ? -Math.random() * 1.5 - 0.5 : (Math.random() - 0.5) * 0.4,
+    };
+
+    particlesRef.current.push(p);
+    if (particlesRef.current.length > 90) {
+      particlesRef.current.shift();
+    }
+
+    if (pType === 'flower') playBloomSound();
+    else playSparkleSound();
+  };
+
+  // Helper to set closed state with audio feedback
+  const setClosedState = (closed: boolean, status: GestureStatus, text: string) => {
     if (closed && !isClosedRef.current) {
       playFrameLockSound();
-      if (autoCycleRef.current) {
+      if (autoCycleRef.current && onCycleNextRef.current) {
         onCycleNextRef.current();
       }
     }
     isClosedRef.current = closed;
-    onStatusChange(status, statusText, closed);
+    onStatusChange(status, text, closed);
   };
 
-  // Helper drawing routines for flowers, stars, hearts
-  const drawFlower = (
-    ctx: CanvasRenderingContext2D,
-    p: FlowerParticle
-  ) => {
+  // Drawing routines for particles
+  const drawFlower = (ctx: CanvasRenderingContext2D, p: FlowerParticle) => {
     ctx.save();
     ctx.translate(p.x, p.y);
     ctx.rotate(p.rotation);
     ctx.globalAlpha = p.alpha;
 
-    const r = p.size;
-    const petalRadius = r * 0.55;
-    const petals = p.petals;
-
-    // Draw Petals
-    ctx.fillStyle = p.color;
-    ctx.shadowColor = p.color;
-    ctx.shadowBlur = 12;
-    for (let i = 0; i < petals; i++) {
-      const angle = (i * 2 * Math.PI) / petals;
-      const px = Math.cos(angle) * (r * 0.5);
-      const py = Math.sin(angle) * (r * 0.5);
-
+    if (p.stemEndY) {
+      ctx.save();
+      ctx.rotate(-p.rotation);
       ctx.beginPath();
-      ctx.arc(px, py, petalRadius, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.moveTo(0, 0);
+      ctx.quadraticCurveTo(6, (p.stemEndY - p.y) * 0.5, 0, p.stemEndY - p.y);
+      ctx.strokeStyle = '#22c55e';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+      ctx.restore();
     }
 
-    // Flower Center
-    ctx.fillStyle = p.centerColor;
-    ctx.shadowColor = '#ffe14d';
-    ctx.shadowBlur = 8;
-    ctx.beginPath();
-    ctx.arc(0, 0, r * 0.35, 0, Math.PI * 2);
-    ctx.fill();
+    const r = p.size;
+    for (let i = 0; i < p.petals; i++) {
+      const angle = (i * Math.PI * 2) / p.petals;
+      ctx.save();
+      ctx.rotate(angle);
 
-    // Inner detail ring
-    ctx.fillStyle = '#ff8f3d';
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.quadraticCurveTo(r * 0.6, -r * 0.4, r, 0);
+      ctx.quadraticCurveTo(r * 0.6, r * 0.4, 0, 0);
+
+      ctx.fillStyle = p.color;
+      ctx.shadowColor = p.color;
+      ctx.shadowBlur = 8;
+      ctx.fill();
+
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
     ctx.beginPath();
-    ctx.arc(0, 0, r * 0.16, 0, Math.PI * 2);
+    ctx.arc(0, 0, r * 0.28, 0, Math.PI * 2);
+    ctx.fillStyle = p.centerColor;
+    ctx.shadowColor = '#ffffff';
+    ctx.shadowBlur = 6;
     ctx.fill();
 
     ctx.restore();
@@ -437,15 +722,18 @@ export const CameraStage: React.FC<CameraStageProps> = ({
 
     const spikes = 5;
     const outerRadius = p.size;
-    const innerRadius = p.size * 0.45;
-    let rot = (Math.PI / 2) * 3;
-    const step = Math.PI / spikes;
+    const innerRadius = p.size * 0.42;
 
     ctx.beginPath();
+    let rot = (Math.PI / 2) * 3;
+    let x = 0;
+    let y = 0;
+    const step = Math.PI / spikes;
+
     ctx.moveTo(0, -outerRadius);
     for (let i = 0; i < spikes; i++) {
-      let x = Math.cos(rot) * outerRadius;
-      let y = Math.sin(rot) * outerRadius;
+      x = Math.cos(rot) * outerRadius;
+      y = Math.sin(rot) * outerRadius;
       ctx.lineTo(x, y);
       rot += step;
 
@@ -459,13 +747,12 @@ export const CameraStage: React.FC<CameraStageProps> = ({
 
     ctx.fillStyle = p.color;
     ctx.shadowColor = p.color;
-    ctx.shadowBlur = 15;
+    ctx.shadowBlur = 12;
     ctx.fill();
 
-    // Star center spark
-    ctx.fillStyle = '#ffffff';
     ctx.beginPath();
-    ctx.arc(0, 0, p.size * 0.25, 0, Math.PI * 2);
+    ctx.arc(0, 0, innerRadius * 0.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
     ctx.fill();
 
     ctx.restore();
@@ -474,19 +761,21 @@ export const CameraStage: React.FC<CameraStageProps> = ({
   const drawHeart = (ctx: CanvasRenderingContext2D, p: FlowerParticle) => {
     ctx.save();
     ctx.translate(p.x, p.y);
-    ctx.rotate(p.rotation);
+    ctx.scale(p.size / 18, p.size / 18);
+    ctx.rotate(p.rotation * 0.2);
     ctx.globalAlpha = p.alpha;
 
-    const s = p.size * 0.08;
     ctx.beginPath();
-    ctx.moveTo(0, -10 * s);
-    ctx.bezierCurveTo(-15 * s, -30 * s, -40 * s, -10 * s, 0, 30 * s);
-    ctx.bezierCurveTo(40 * s, -10 * s, 15 * s, -30 * s, 0, -10 * s);
+    ctx.moveTo(0, -4);
+    ctx.bezierCurveTo(-9, -15, -18, -4, -18, 5);
+    ctx.bezierCurveTo(-18, 14, -9, 21, 0, 26);
+    ctx.bezierCurveTo(9, 21, 18, 14, 18, 5);
+    ctx.bezierCurveTo(18, -4, 9, -15, 0, -4);
     ctx.closePath();
 
     ctx.fillStyle = p.color;
     ctx.shadowColor = p.color;
-    ctx.shadowBlur = 16;
+    ctx.shadowBlur = 14;
     ctx.fill();
 
     ctx.restore();
@@ -536,6 +825,86 @@ export const CameraStage: React.FC<CameraStageProps> = ({
     ctx.restore();
   };
 
+  // Helper to draw corner reticles L-brackets
+  const drawCornerBrackets = (
+    ctx: CanvasRenderingContext2D,
+    quad: Point[],
+    time: number,
+    color: string
+  ) => {
+    const bracketLen = 22;
+    ctx.save();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2.8;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 14;
+
+    // Corner 0: Top-Left (right, down)
+    ctx.beginPath();
+    ctx.moveTo(quad[0].x, quad[0].y + bracketLen);
+    ctx.lineTo(quad[0].x, quad[0].y);
+    ctx.lineTo(quad[0].x + bracketLen, quad[0].y);
+    ctx.stroke();
+
+    // Corner 1: Top-Right (left, down)
+    ctx.beginPath();
+    ctx.moveTo(quad[1].x - bracketLen, quad[1].y);
+    ctx.lineTo(quad[1].x, quad[1].y);
+    ctx.lineTo(quad[1].x, quad[1].y + bracketLen);
+    ctx.stroke();
+
+    // Corner 2: Bottom-Right (left, up)
+    ctx.beginPath();
+    ctx.moveTo(quad[2].x, quad[2].y - bracketLen);
+    ctx.lineTo(quad[2].x, quad[2].y);
+    ctx.lineTo(quad[2].x - bracketLen, quad[2].y);
+    ctx.stroke();
+
+    // Corner 3: Bottom-Left (right, up)
+    ctx.beginPath();
+    ctx.moveTo(quad[3].x + bracketLen, quad[3].y);
+    ctx.lineTo(quad[3].x, quad[3].y);
+    ctx.lineTo(quad[3].x, quad[3].y - bracketLen);
+    ctx.stroke();
+
+    ctx.restore();
+  };
+
+  // Helper to draw illuminated fingertip dots (Index and Thumb)
+  const drawFingertipDots = (
+    ctx: CanvasRenderingContext2D,
+    pts: Point[],
+    time: number,
+    color: string,
+    labels?: string[]
+  ) => {
+    ctx.save();
+    pts.forEach((q, idx) => {
+      // Solid white circular dot (matching YouTube Short screenshot)
+      ctx.beginPath();
+      ctx.arc(q.x, q.y, 5.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffffff';
+      ctx.shadowColor = '#ffffff';
+      ctx.shadowBlur = 8;
+      ctx.fill();
+
+      // Soft glowing concentric halo ring
+      const ringPulse = 9 + Math.sin(time * 6 + idx) * 2.5;
+      ctx.beginPath();
+      ctx.arc(q.x, q.y, ringPulse, 0, Math.PI * 2);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+
+      if (labels && labels[idx]) {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+        ctx.font = '9px monospace font-bold';
+        ctx.fillText(labels[idx], q.x + 8, q.y - 8);
+      }
+    });
+    ctx.restore();
+  };
+
   // Main Render Loop
   const renderFrame = useCallback(
     (time: number) => {
@@ -568,20 +937,31 @@ export const CameraStage: React.FC<CameraStageProps> = ({
 
       const w = canvas.width;
       const h = canvas.height;
+      const isUserFacing = facingRef.current === 'user';
+      const mode = playModeRef.current;
+      const palette = paletteRef.current;
+      const style = styleRef.current;
+      const isClosed = isClosedRef.current;
+      const quad = quadRef.current;
+      const condition = conditionRef.current;
+      const tf = trackedFingersRef.current;
 
       // 1. Draw Camera video (mirrored for selfie)
       ctx.clearRect(0, 0, w, h);
       ctx.save();
-      if (facingRef.current === 'user') {
+      if (isUserFacing) {
         ctx.translate(w, 0);
         ctx.scale(-1, 1);
       }
+
+      // If style is Color Pop Spotlight, desaturate the background
+      if (style.id === 'color-pop' && isClosed && quad) {
+        ctx.filter = 'grayscale(100%) brightness(80%)';
+      }
       ctx.drawImage(video, 0, 0, w, h);
+      ctx.filter = 'none';
       ctx.restore();
 
-      const mode = playModeRef.current;
-      const palette = paletteRef.current;
-      const isUserFacing = facingRef.current === 'user';
       const mx = (l: { x: number }) => (isUserFacing ? 1 - l.x : l.x) * w;
       const my = (l: { y: number }) => l.y * h;
 
@@ -589,45 +969,210 @@ export const CameraStage: React.FC<CameraStageProps> = ({
       if (showSkeletonRef.current && lastHandsRef.current.length > 0) {
         ctx.save();
         lastHandsRef.current.forEach((hand) => {
-          const connections = [
-            [0, 1], [1, 2], [2, 3], [3, 4],
-            [0, 5], [5, 6], [6, 7], [7, 8],
-            [0, 9], [9, 10], [10, 11], [11, 12],
-            [0, 13], [13, 14], [14, 15], [15, 16],
-            [0, 17], [17, 18], [18, 19], [19, 20],
-          ];
-
-          ctx.strokeStyle = palette.colors[0];
-          ctx.lineWidth = 2;
-          ctx.globalAlpha = 0.6;
-          connections.forEach(([i, j]) => {
-            if (hand[i] && hand[j]) {
-              ctx.beginPath();
-              ctx.moveTo(mx(hand[i]), my(hand[i]));
-              ctx.lineTo(mx(hand[j]), my(hand[j]));
-              ctx.stroke();
-            }
-          });
-
-          hand.forEach((lm, idx) => {
+          // Strictly highlight only first finger (Index 8) and Thumb (4)
+          [4, 8].forEach((lmIdx) => {
+            const lm = hand[lmIdx];
+            if (!lm) return;
             const x = mx(lm);
             const y = my(lm);
             ctx.beginPath();
-            ctx.arc(x, y, idx === 8 ? 8 : 4, 0, Math.PI * 2);
-            ctx.fillStyle = idx === 8 ? '#ffffff' : palette.colors[1];
-            ctx.shadowColor = ctx.fillStyle;
-            ctx.shadowBlur = idx === 8 ? 14 : 4;
+            ctx.arc(x, y, 9, 0, Math.PI * 2);
+            ctx.fillStyle = '#ffffff';
+            ctx.shadowColor = palette.colors[0];
+            ctx.shadowBlur = 14;
             ctx.fill();
+            ctx.strokeStyle = palette.colors[1];
+            ctx.lineWidth = 2;
+            ctx.stroke();
           });
         });
         ctx.restore();
       }
 
-      // 3. WAND GARDEN PARTICLES & TRAILS RENDERING (like flower-wand-garden!)
+      // 3. FINGER FRAME RENDERING (ACCORDING TO CONDITION)
+      if (mode === 'frame') {
+        if (isClosed && quad && quad.length === 4) {
+          const xs = quad.map((q) => q.x);
+          const ys = quad.map((q) => q.y);
+          const bounds: Bounds = {
+            x: Math.min(...xs),
+            y: Math.min(...ys),
+            w: Math.max(...xs) - Math.min(...xs),
+            h: Math.max(...ys) - Math.min(...ys),
+          };
+
+          const [p0, p1, p2, p3] = quad; // [Top-Left, Top-Right, Bottom-Right, Bottom-Left]
+
+          const createQuadPath = () => {
+            ctx.beginPath();
+            quad.forEach((q, idx) => {
+              if (idx === 0) ctx.moveTo(q.x, q.y);
+              else ctx.lineTo(q.x, q.y);
+            });
+            ctx.closePath();
+          };
+
+          // Render live shader clipped inside the shape
+          ctx.save();
+          createQuadPath();
+          ctx.clip();
+          try {
+            style.render(
+              ctx,
+              bounds,
+              time / 1000,
+              palette.colors,
+              canvas,
+              quad,
+              video,
+              isUserFacing,
+              condition
+            );
+          } catch (e) {
+            console.error('Style render error:', e);
+          }
+          ctx.restore();
+
+          // ========================================================
+          // RENDER LINES ACCORDING TO CONDITION
+          // ========================================================
+
+          // CONDITION A: UPSIDE-DOWN (MATCHING YOUTUBE SHORT SCREENSHOT)
+          if (condition === 'upside_down') {
+            ctx.save();
+            ctx.setLineDash([5, 5]); // Delicate white dotted lines
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 2.0;
+            ctx.shadowColor = 'rgba(255, 255, 255, 0.45)';
+            ctx.shadowBlur = 6;
+
+            // 1. Line along Left hand: p0 to p3
+            ctx.beginPath();
+            ctx.moveTo(p0.x, p0.y);
+            ctx.lineTo(p3.x, p3.y);
+            ctx.stroke();
+
+            // 2. Line along Right hand: p1 to p2
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.stroke();
+
+            // 3. Diagonal line crossing down-right: p0 to p2
+            ctx.beginPath();
+            ctx.moveTo(p0.x, p0.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.stroke();
+
+            // 4. Diagonal line crossing up-right: p3 to p1
+            ctx.beginPath();
+            ctx.moveTo(p3.x, p3.y);
+            ctx.lineTo(p1.x, p1.y);
+            ctx.stroke();
+
+            // 5. Top horizontal line: p0 to p1
+            ctx.beginPath();
+            ctx.moveTo(p0.x, p0.y);
+            ctx.lineTo(p1.x, p1.y);
+            ctx.stroke();
+
+            // 6. Bottom horizontal line: p3 to p2
+            ctx.beginPath();
+            ctx.moveTo(p3.x, p3.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.stroke();
+
+            ctx.restore();
+
+            // Draw central intersection reticle where diagonals cross
+            if (tf.centerPt) {
+              ctx.save();
+              ctx.fillStyle = '#ffffff';
+              ctx.shadowColor = '#ffffff';
+              ctx.shadowBlur = 10;
+              ctx.beginPath();
+              ctx.arc(tf.centerPt.x, tf.centerPt.y, 4, 0, Math.PI * 2);
+              ctx.fill();
+
+              ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+              ctx.lineWidth = 1.2;
+              ctx.beginPath();
+              ctx.arc(tf.centerPt.x, tf.centerPt.y, 9, 0, Math.PI * 2);
+              ctx.stroke();
+              ctx.restore();
+            }
+
+            // Draw white glowing dots on all 4 fingertips
+            drawFingertipDots(
+              ctx,
+              quad,
+              time / 1000,
+              palette.colors[1],
+              ['L-INDEX', 'R-THUMB', 'R-INDEX', 'L-THUMB']
+            );
+          }
+
+          // CONDITION B: PINCH ATTACHED (FINGERS CONNECTED)
+          else if (condition === 'pinch_attached') {
+            // Continuous solid neon laser line
+            ctx.save();
+            ctx.setLineDash([]);
+            createQuadPath();
+            ctx.lineWidth = 4.0;
+            ctx.strokeStyle = palette.colors[0];
+            ctx.shadowColor = palette.colors[1];
+            ctx.shadowBlur = 26;
+            ctx.lineJoin = 'round';
+            ctx.stroke();
+
+            // Inner white laser core
+            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = '#ffffff';
+            ctx.shadowBlur = 4;
+            ctx.stroke();
+            ctx.restore();
+
+            // Draw locked corner brackets
+            drawCornerBrackets(ctx, quad, time / 1000, palette.colors[1]);
+            drawFingertipDots(ctx, quad, time / 1000, palette.colors[0]);
+
+            // Sparkling pinch lock rings at pinch contacts
+            ctx.save();
+            const pinchCenter = { x: (p0.x + p2.x) / 2, y: (p0.y + p2.y) / 2 };
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+            ctx.font = '10px monospace font-extrabold';
+            ctx.fillText('🔒 PINCH LOCKED', bounds.x + 8, bounds.y + bounds.h - 8);
+            ctx.restore();
+          }
+
+          // CONDITION C: APART QUAD (UPRIGHT HANDS APART)
+          else {
+            ctx.save();
+            ctx.setLineDash([5, 5]);
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 2.2;
+            ctx.shadowColor = palette.colors[0];
+            ctx.shadowBlur = 12;
+            createQuadPath();
+            ctx.stroke();
+            ctx.restore();
+
+            drawCornerBrackets(ctx, quad, time / 1000, palette.colors[1]);
+            drawFingertipDots(
+              ctx,
+              quad,
+              time / 1000,
+              palette.colors[1],
+              ['INDEX', 'INDEX', 'THUMB', 'THUMB']
+            );
+          }
+        }
+      }
+
+      // 4. WAND GARDEN PARTICLES & TRAILS RENDERING
       if (mode !== 'frame') {
-        // Draw Magic Trails behind fingertips
         const trails = trailsRef.current;
-        const trailLifetime = 600; // ms
+        const trailLifetime = 600;
         ctx.save();
         for (let i = trails.length - 1; i >= 0; i--) {
           const pt = trails[i];
@@ -649,7 +1194,6 @@ export const CameraStage: React.FC<CameraStageProps> = ({
         }
         ctx.restore();
 
-        // Draw Wand Star/Glow Cursor at index fingertip
         if (lastHandsRef.current.length > 0) {
           ctx.save();
           lastHandsRef.current.forEach((hand) => {
@@ -658,7 +1202,6 @@ export const CameraStage: React.FC<CameraStageProps> = ({
             const x = mx(tip);
             const y = my(tip);
 
-            // Pulsing magic wand reticle
             const wandPulse = Math.sin(time / 150) * 4 + 14;
             ctx.beginPath();
             ctx.arc(x, y, wandPulse, 0, Math.PI * 2);
@@ -668,7 +1211,6 @@ export const CameraStage: React.FC<CameraStageProps> = ({
             ctx.shadowBlur = 18;
             ctx.stroke();
 
-            // Inner bright core
             ctx.beginPath();
             ctx.arc(x, y, 5, 0, Math.PI * 2);
             ctx.fillStyle = '#ffffff';
@@ -677,25 +1219,19 @@ export const CameraStage: React.FC<CameraStageProps> = ({
           ctx.restore();
         }
 
-        // Draw Living Planted Flowers & Particles
         const particles = particlesRef.current;
         for (let i = particles.length - 1; i >= 0; i--) {
           const p = particles[i];
           p.age++;
-
-          // Gentle movement / float
+          if (p.size < p.targetSize) {
+            p.size += (p.targetSize - p.size) * 0.12;
+          }
+          p.rotation += p.rotationSpeed;
           if (p.vx) p.x += p.vx;
           if (p.vy) p.y += p.vy;
-          p.rotation += p.rotationSpeed;
 
-          // Bloom growth animation
-          if (p.size < p.targetSize) {
-            p.size += (p.targetSize - p.size) * 0.18;
-          }
-
-          // Fade out near end of life
-          if (p.age > p.maxAge - 40) {
-            p.alpha = Math.max(0, (p.maxAge - p.age) / 40);
+          if (p.age > p.maxAge - 30) {
+            p.alpha = Math.max(0, (p.maxAge - p.age) / 30);
           }
 
           if (p.age >= p.maxAge) {
@@ -703,211 +1239,139 @@ export const CameraStage: React.FC<CameraStageProps> = ({
             continue;
           }
 
-          if (p.type === 'flower') {
-            drawFlower(ctx, p);
-          } else if (p.type === 'star') {
-            drawStar(ctx, p);
-          } else if (p.type === 'heart') {
-            drawHeart(ctx, p);
-          } else if (p.type === 'bubble') {
-            drawBubble(ctx, p);
-          } else {
-            drawSparkle(ctx, p);
-          }
+          if (p.type === 'flower') drawFlower(ctx, p);
+          else if (p.type === 'star') drawStar(ctx, p);
+          else if (p.type === 'heart') drawHeart(ctx, p);
+          else if (p.type === 'bubble') drawBubble(ctx, p);
+          else drawSparkle(ctx, p);
         }
-      }
-
-      // 4. FINGER FRAME RENDERING (When in Frame Mode)
-      if (mode === 'frame') {
-        const quad = quadRef.current;
-        const isClosed = isClosedRef.current;
-        const style = styleRef.current;
-
-        if (isClosed && quad && quad.length === 4) {
-          const xs = quad.map((q) => q.x);
-          const ys = quad.map((q) => q.y);
-          const bounds: Bounds = {
-            x: Math.min(...xs),
-            y: Math.min(...ys),
-            w: Math.max(...xs) - Math.min(...xs),
-            h: Math.max(...ys) - Math.min(...ys),
-          };
-
-          const createQuadPath = () => {
-            ctx.beginPath();
-            quad.forEach((q, idx) => {
-              if (idx === 0) ctx.moveTo(q.x, q.y);
-              else ctx.lineTo(q.x, q.y);
-            });
-            ctx.closePath();
-          };
-
-          // Render pattern clipped inside quadrilateral
-          ctx.save();
-          createQuadPath();
-          ctx.clip();
-          try {
-            style.render(ctx, bounds, time / 1000, palette.colors, canvas, quad);
-          } catch {
-            // Safe fallback
-          }
-          ctx.restore();
-
-          // Glowing boundary line
-          ctx.save();
-          createQuadPath();
-          ctx.lineWidth = 5;
-          ctx.strokeStyle = palette.colors[0];
-          ctx.shadowColor = palette.colors[1];
-          ctx.shadowBlur = 24;
-          ctx.lineJoin = 'round';
-          ctx.stroke();
-          ctx.restore();
-
-          // Corner reticles
-          ctx.save();
-          quad.forEach((q) => {
-            ctx.beginPath();
-            ctx.arc(q.x, q.y, 5, 0, Math.PI * 2);
-            ctx.fillStyle = '#ffffff';
-            ctx.shadowColor = palette.colors[1];
-            ctx.shadowBlur = 10;
-            ctx.fill();
-          });
-          ctx.restore();
-        }
-      }
-
-      // 5. Send frame to MediaPipe if not busy
-      if (handsInstanceRef.current && !busyRef.current) {
-        busyRef.current = true;
-        handsInstanceRef.current
-          .send({ image: video })
-          .catch(() => {})
-          .finally(() => {
-            busyRef.current = false;
-          });
       }
 
       reqAnimRef.current = requestAnimationFrame(renderFrame);
     },
-    []
+    [drawFlower, drawStar, drawHeart, drawSparkle, drawBubble]
   );
 
-  // Start Camera
-  const openCamera = useCallback(async () => {
-    try {
-      setErrorMessage(null);
+  // Setup Camera and loop
+  useEffect(() => {
+    let active = true;
+
+    async function startCamera() {
+      try {
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((t) => t.stop());
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: facing,
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        });
+
+        if (!active) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.onloadedmetadata = () => {
+            videoRef.current?.play();
+            setHasStarted(true);
+            setErrorMessage(null);
+            onStatusChange('forming', 'Raise hands to frame face', false);
+          };
+        }
+      } catch (err) {
+        console.error('Camera access error:', err);
+        setErrorMessage('Unable to access camera. Please grant camera permission.');
+        onStatusChange('error', 'Camera blocked', false);
+      }
+    }
+
+    startCamera();
+
+    return () => {
+      active = false;
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
       }
+    };
+  }, [facing, onStatusChange]);
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: facingRef.current,
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-        audio: false,
-      });
-
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
-
-      setHasStarted(true);
-      quadRef.current = null;
-      particlesRef.current = [];
-      trailsRef.current = [];
-
-      if (playModeRef.current === 'frame') {
-        setClosedState(false, 'no_hands', 'Show both hands');
-      } else {
-        onStatusChange('no_hands', 'Show hand to draw flowers', false);
-      }
-
-      if (!reqAnimRef.current) {
-        reqAnimRef.current = requestAnimationFrame(renderFrame);
-      }
-    } catch (err: any) {
-      console.error('Camera open error:', err);
-      setErrorMessage(
-        'Unable to access camera. Please allow camera permissions in your browser bar.'
-      );
-      onStatusChange('error', 'Camera blocked', false);
-    }
-  }, [renderFrame, onStatusChange]);
-
-  // Restart camera when facing changes
+  // Request hand inference frames
   useEffect(() => {
-    if (hasStarted) {
-      openCamera();
-    }
-  }, [facing, openCamera, hasStarted]);
+    let animId: number;
 
-  // Cleanup on unmount
+    const sendFrameToHands = async () => {
+      const video = videoRef.current;
+      const hands = handsInstanceRef.current;
+
+      if (video && hands && video.readyState >= 2 && !busyRef.current) {
+        busyRef.current = true;
+        try {
+          await hands.send({ image: video });
+        } catch {
+          busyRef.current = false;
+        }
+      }
+      animId = requestAnimationFrame(sendFrameToHands);
+    };
+
+    animId = requestAnimationFrame(sendFrameToHands);
+    return () => cancelAnimationFrame(animId);
+  }, []);
+
+  // Start Canvas Render Animation
   useEffect(() => {
+    reqAnimRef.current = requestAnimationFrame(renderFrame);
     return () => {
       if (reqAnimRef.current) {
         cancelAnimationFrame(reqAnimRef.current);
       }
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-      }
-      if (micStreamRef.current) {
-        micStreamRef.current.getTracks().forEach((t) => t.stop());
-      }
-      if (recTimerRef.current) {
-        clearInterval(recTimerRef.current);
-      }
     };
-  }, []);
+  }, [renderFrame]);
 
-  // Shutter Snapshot Execution
+  // PHOTO CAPTURE
   const executeSnap = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     setFlashActive(true);
-    setTimeout(() => setFlashActive(false), 350);
-
     playShutterSound();
+    setTimeout(() => setFlashActive(false), 200);
 
-    try {
-      confetti({
-        particleCount: 50,
-        spread: 70,
-        origin: { y: 0.8 },
-      });
-    } catch {
-      // Ignore
-    }
+    confetti({
+      particleCount: 35,
+      spread: 60,
+      origin: { y: 0.8 },
+      colors: paletteRef.current.colors,
+    });
 
     canvas.toBlob((blob) => {
       if (blob) {
         onMediaCaptured(blob, 'photo');
       }
-    }, 'image/png');
+    }, 'image/jpeg', 0.95);
   }, [onMediaCaptured]);
 
-  // Photo snap trigger with countdown
-  const takePhoto = useCallback(() => {
-    if (countdown !== null) return;
-
+  const triggerSnap = useCallback(() => {
     if (photoTimer > 0) {
+      setCountdown(photoTimer);
       let count = photoTimer;
-      setCountdown(count);
       playCountdownTick(false);
 
-      const interval = setInterval(() => {
+      const timerId = setInterval(() => {
         count--;
         if (count > 0) {
           setCountdown(count);
           playCountdownTick(false);
         } else {
-          clearInterval(interval);
+          clearInterval(timerId);
           setCountdown(null);
           playCountdownTick(true);
           executeSnap();
@@ -916,12 +1380,14 @@ export const CameraStage: React.FC<CameraStageProps> = ({
     } else {
       executeSnap();
     }
-  }, [photoTimer, countdown, executeSnap]);
+  }, [photoTimer, executeSnap]);
 
-  // Video Recording: Start Recording
+  triggerSnapRef.current = triggerSnap;
+
+  // VIDEO RECORDING
   const startRecording = useCallback(async () => {
     const canvas = canvasRef.current;
-    if (!canvas || isRecording) return;
+    if (!canvas) return;
 
     try {
       const canvasStream = canvas.captureStream(30);
@@ -930,223 +1396,177 @@ export const CameraStage: React.FC<CameraStageProps> = ({
         try {
           const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
           micStreamRef.current = micStream;
-          const audioTrack = micStream.getAudioTracks()[0];
-          if (audioTrack) {
-            canvasStream.addTrack(audioTrack);
-          }
-        } catch {
-          console.warn('Microphone permission denied, recording silent video.');
+          micStream.getAudioTracks().forEach((track) => canvasStream.addTrack(track));
+        } catch (e) {
+          console.warn('Microphone access denied:', e);
         }
       }
 
-      const types = [
-        'video/webm;codecs=vp9,opus',
-        'video/webm;codecs=vp8,opus',
-        'video/webm',
-        'video/mp4',
-      ];
-      const mimeType = types.find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+      let mimeType = 'video/webm;codecs=vp9';
+      if (!MediaRecorder.isTypeSupported(mimeType)) {
+        mimeType = 'video/webm';
+      }
 
-      const recorder = new MediaRecorder(
-        canvasStream,
-        mimeType ? { mimeType, videoBitsPerSecond: 6000000 } : {}
-      );
+      const mediaRecorder = new MediaRecorder(canvasStream, {
+        mimeType,
+        videoBitsPerSecond: 3000000,
+      });
 
       recordedChunksRef.current = [];
-      recorder.ondataavailable = (e) => {
+
+      mediaRecorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) {
           recordedChunksRef.current.push(e.data);
         }
       };
 
-      recorder.onstop = () => {
-        if (recTimerRef.current) {
-          clearInterval(recTimerRef.current);
-          recTimerRef.current = null;
-        }
-
-        const duration = Math.round((Date.now() - recordStartTimeRef.current) / 1000);
-        const finalBlob = new Blob(recordedChunksRef.current, {
-          type: recorder.mimeType || 'video/webm',
-        });
+      mediaRecorder.onstop = () => {
+        const durationSec = Math.round((Date.now() - recordStartTimeRef.current) / 1000);
+        const blob = new Blob(recordedChunksRef.current, { type: mimeType });
+        onMediaCaptured(blob, 'video', durationSec);
 
         if (micStreamRef.current) {
           micStreamRef.current.getTracks().forEach((t) => t.stop());
           micStreamRef.current = null;
         }
-
-        setIsRecording(false);
-        setRecordingTime(0);
-        playRecordStop();
-
-        try {
-          confetti({
-            particleCount: 60,
-            spread: 80,
-            origin: { y: 0.75 },
-          });
-        } catch {
-          // ignore
-        }
-
-        onMediaCaptured(finalBlob, 'video', Math.max(1, duration));
       };
 
-      recorder.start(250);
-      mediaRecorderRef.current = recorder;
+      mediaRecorder.start(100);
+      mediaRecorderRef.current = mediaRecorder;
       recordStartTimeRef.current = Date.now();
       setIsRecording(true);
       setRecordingTime(0);
       playRecordStart();
 
       recTimerRef.current = window.setInterval(() => {
-        const secs = Math.floor((Date.now() - recordStartTimeRef.current) / 1000);
-        setRecordingTime(secs);
-      }, 500);
-    } catch (err) {
-      console.error('Failed to start video recording:', err);
+        const elapsed = Math.floor((Date.now() - recordStartTimeRef.current) / 1000);
+        setRecordingTime(elapsed);
+      }, 1000);
+    } catch (e) {
+      console.error('Failed to start recording:', e);
       setIsRecording(false);
     }
-  }, [isRecording, micEnabled, onMediaCaptured, setIsRecording, setRecordingTime]);
+  }, [micEnabled, onMediaCaptured, setIsRecording, setRecordingTime]);
 
   const stopRecording = useCallback(() => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
+      playRecordStop();
     }
-  }, []);
+    if (recTimerRef.current) {
+      clearInterval(recTimerRef.current);
+      recTimerRef.current = null;
+    }
+    setIsRecording(false);
+  }, [setIsRecording]);
 
-  useEffect(() => {
-    triggerSnapRef.current = takePhoto;
-    triggerRecordRef.current = isRecording ? stopRecording : startRecording;
-  }, [takePhoto, isRecording, stopRecording, startRecording, triggerSnapRef, triggerRecordRef]);
-
-  // Spacebar and R shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
-      if (e.code === 'Space') {
-        e.preventDefault();
-        takePhoto();
-      } else if (e.key === 'r' || e.key === 'R') {
-        e.preventDefault();
-        if (isRecording) {
-          stopRecording();
-        } else {
-          startRecording();
-        }
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [takePhoto, isRecording, stopRecording, startRecording]);
-
-  const formatRecTime = (sec: number) => {
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    return `${m}:${s.toString().padStart(2, '0')}`;
+  triggerRecordRef.current = () => {
+    if (isRecording) {
+      stopRecording();
+    } else {
+      startRecording();
+    }
   };
 
   return (
-    <div className="relative flex-1 w-full flex items-center justify-center min-h-0 p-2 sm:p-4 select-none">
-      {/* Hidden processing video */}
+    <div className="relative w-full h-full flex items-center justify-center bg-black overflow-hidden select-none">
+      {/* Hidden Video for MediaPipe Stream */}
       <video
         ref={videoRef}
+        className="hidden"
         playsInline
         muted
         autoPlay
-        className="hidden"
       />
 
-      {/* Main Canvas Display */}
-      <div className="relative max-h-full max-w-full flex items-center justify-center rounded-2xl overflow-hidden shadow-2xl bg-black border border-purple-900/40">
-        <canvas
-          ref={canvasRef}
-          width={1280}
-          height={720}
-          className="max-w-full max-h-[66vh] sm:max-h-[70vh] w-auto h-auto object-contain block rounded-2xl"
-        />
+      {/* Main Interactive Canvas */}
+      <canvas
+        ref={canvasRef}
+        className="w-full h-full object-contain pointer-events-auto"
+      />
 
-        {/* Shutter Flash Animation */}
-        <div
-          className={`absolute inset-0 bg-white pointer-events-none transition-opacity ${
-            flashActive ? 'flash-active' : 'opacity-0'
-          }`}
-        />
+      {/* Photo Flash Overlay */}
+      <div
+        className={`absolute inset-0 bg-white pointer-events-none transition-opacity duration-200 z-40 ${
+          flashActive ? 'opacity-95' : 'opacity-0'
+        }`}
+      />
 
-        {/* Countdown Overlay */}
-        {countdown !== null && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm z-30">
-            <div className="text-8xl sm:text-9xl font-extrabold text-transparent bg-clip-text bg-gradient-to-tr from-cyan-400 to-fuchsia-400 animate-bounce drop-shadow-[0_10px_20px_rgba(0,240,255,0.6)]">
-              {countdown}
-            </div>
+      {/* Countdown Timer Display */}
+      {countdown !== null && (
+        <div className="absolute inset-0 flex items-center justify-center z-40 pointer-events-none">
+          <div className="w-28 h-28 rounded-full bg-black/60 border-2 border-white/80 backdrop-blur-md flex items-center justify-center animate-ping">
+            <span className="text-6xl font-black text-white font-mono">{countdown}</span>
           </div>
-        )}
+        </div>
+      )}
 
-        {/* Recording HUD */}
-        {isRecording && (
-          <div className="absolute top-3 left-3 z-20 flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-600/90 text-white text-xs font-mono font-bold shadow-lg backdrop-blur-sm border border-red-400/50 animate-pulse">
-            <span className="w-2.5 h-2.5 rounded-full bg-white animate-ping" />
-            <span>REC</span>
-            <span>{formatRecTime(recordingTime)}</span>
-          </div>
-        )}
-
-        {/* FPS & Mode Indicator */}
-        {hasStarted && (
-          <div className="absolute bottom-3 left-3 z-10 hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded bg-black/70 backdrop-blur-sm border border-white/10 text-[11px] font-mono text-purple-200">
-            <Zap className="w-3.5 h-3.5 text-cyan-400" />
-            <span>{fpsRef.current} FPS</span>
-            <span>•</span>
-            <span className="capitalize text-fuchsia-300 font-bold">
-              {playMode === 'wand' ? '🌸 Flower Wand' : playMode}
-            </span>
-          </div>
-        )}
-
-        {/* Start Camera Hero Prompt */}
-        {!hasStarted && (
-          <div className="absolute inset-0 z-30 flex flex-col items-center justify-center p-6 bg-[#0c0b14]/95 text-center backdrop-blur-xl">
-            <div className="relative mb-5">
-              <div className="w-20 h-20 rounded-3xl bg-gradient-to-tr from-pink-500 via-purple-600 to-cyan-400 p-[2px] shadow-[0_0_40px_rgba(236,72,153,0.4)] animate-pulse">
-                <div className="w-full h-full bg-[#100e1a] rounded-[22px] flex items-center justify-center">
-                  <Flower2 className="w-10 h-10 text-pink-400" />
-                </div>
-              </div>
-            </div>
-
-            <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight mb-2">
-              Flower Wand & Finger Camera
-            </h2>
-
-            <p className="max-w-md text-sm text-purple-200/80 leading-relaxed mb-6">
-              Move your fingertip like a magic wand to bloom vibrant flowers and stars in the air, or close both hands to create glowing visual frames. Snap photos and record HD video clips!
-            </p>
-
+      {/* Error state */}
+      {errorMessage && (
+        <div className="absolute inset-0 flex items-center justify-center p-6 bg-black/90 z-50">
+          <div className="max-w-md p-6 bg-red-950/60 border border-red-500/50 rounded-2xl text-center space-y-3">
+            <AlertCircle className="w-10 h-10 text-red-400 mx-auto" />
+            <h3 className="text-lg font-bold text-white">Camera Access Required</h3>
+            <p className="text-sm text-neutral-300">{errorMessage}</p>
             <button
-              onClick={openCamera}
-              className="px-8 py-3.5 rounded-full bg-gradient-to-r from-pink-500 via-fuchsia-500 to-cyan-400 hover:from-pink-400 hover:to-cyan-300 text-white font-extrabold text-base transition-all shadow-[0_0_25px_rgba(236,72,153,0.5)] active:scale-95 cursor-pointer flex items-center gap-2"
+              onClick={() => window.location.reload()}
+              className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold transition-colors cursor-pointer"
             >
-              <Camera className="w-5 h-5 text-white" />
-              <span>Start Camera & Wands</span>
+              Try Again
             </button>
-
-            {errorMessage && (
-              <div className="mt-4 flex items-center gap-2 text-xs text-red-300 bg-red-950/40 border border-red-800/50 px-3 py-2 rounded-lg max-w-sm">
-                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
-                <span>{errorMessage}</span>
-              </div>
-            )}
-
-            <div className="mt-6 flex items-center gap-4 text-xs text-purple-400/60 font-medium">
-              <span>🌸 Real-time finger wand tracking</span>
-              <span>•</span>
-              <span>🎥 Record video & audio</span>
-              <span>•</span>
-              <span>🔒 100% private in-browser</span>
-            </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* Condition Indicator Pill */}
+      {playMode === 'frame' && hasStarted && (
+        <div className="absolute top-3 left-3 z-30 pointer-events-none flex flex-col gap-1.5">
+          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-md border border-white/20 text-white text-[11px] font-bold shadow-lg">
+            {conditionRef.current === 'upside_down' && (
+              <>
+                <span className="text-amber-400">⏳</span>
+                <span className="text-amber-200">UPSIDE-DOWN TREND</span>
+                <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-500/30 text-amber-200 font-mono">
+                  CROSSING
+                </span>
+              </>
+            )}
+            {conditionRef.current === 'pinch_attached' && (
+              <>
+                <span className="text-cyan-400">🔒</span>
+                <span className="text-cyan-200">PINCH ATTACHED</span>
+                <span className="text-[9px] px-1.5 py-0.2 rounded bg-cyan-500/30 text-cyan-200 font-mono">
+                  LOCKED
+                </span>
+              </>
+            )}
+            {conditionRef.current === 'apart_quad' && (
+              <>
+                <span className="text-purple-400">✨</span>
+                <span className="text-purple-200">FINGERS APART</span>
+                <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-500/30 text-purple-200 font-mono">
+                  QUAD
+                </span>
+              </>
+            )}
+            {conditionRef.current === 'single_l' && (
+              <>
+                <span className="text-pink-400">👆</span>
+                <span className="text-pink-200">1-HAND VIEWFINDER</span>
+              </>
+            )}
+            {conditionRef.current === 'none' && (
+              <>
+                <span className="text-neutral-400">📐</span>
+                <span className="text-neutral-300">Raise Hands to Frame</span>
+              </>
+            )}
+          </div>
+          <span className="text-[9px] text-white/50 font-mono pl-2">
+            First Finger &amp; Thumb Only
+          </span>
+        </div>
+      )}
     </div>
   );
 };

@@ -16,7 +16,25 @@ export interface ColorPalette {
   colors: [string, string, string]; // [primary, secondary, darkBg]
 }
 
-export type PlayMode = 'wand' | 'frame' | 'stars' | 'hearts' | 'bubbles';
+export type PlayMode = 'frame' | 'wand' | 'stars' | 'hearts' | 'bubbles';
+
+export type FrameCondition =
+  | 'upside_down'    // Hands apart, one hand inverted/upside-down (viral hourglass/crossing)
+  | 'apart_quad'     // Hands apart, upright Ls (floating box)
+  | 'pinch_attached' // Fingers attached/touching (dual-hand pinch lock)
+  | 'single_l'       // Single hand L
+  | 'none';
+
+export interface FingertipData {
+  leftIndex?: Point;
+  leftThumb?: Point;
+  rightIndex?: Point;
+  rightThumb?: Point;
+  leftInverted?: boolean;
+  rightInverted?: boolean;
+  isAttached?: boolean;
+  condition: FrameCondition;
+}
 
 export interface FlowerParticle {
   id: string;
@@ -50,13 +68,17 @@ export interface FrameStyle {
   id: string;
   name: string;
   category?: string;
+  description?: string;
   render: (
     ctx: CanvasRenderingContext2D,
     bounds: Bounds,
     time: number,
     palette: [string, string, string],
     canvas: HTMLCanvasElement,
-    rawQuad?: Point[]
+    rawQuad?: Point[],
+    video?: HTMLVideoElement | null,
+    isMirrored?: boolean,
+    condition?: FrameCondition
   ) => void;
 }
 
@@ -80,4 +102,6 @@ export type GestureStatus =
   | 'wand_active'
   | 'forming'
   | 'locked'
+  | 'attached'
+  | 'upside_down'
   | 'error';
