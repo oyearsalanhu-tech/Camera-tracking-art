@@ -6,11 +6,18 @@ import { ConditionSelector } from './components/ConditionSelector';
 import { StyleSelector } from './components/StyleSelector';
 import { ControlsBar } from './components/ControlsBar';
 import { GalleryDrawer } from './components/GalleryDrawer';
+import { ShareModal } from './components/ShareModal';
 import { TutorialModal } from './components/TutorialModal';
 import { STYLES, PALETTES } from './utils/stylesAndPalettes';
 import { GestureStatus, CapturedMedia, PlayMode, FrameCondition } from './types/fingerFrame';
 import { setSoundEnabled } from './utils/audioSynth';
-import { Play } from 'lucide-react';
+import {
+  saveMediaToStorage,
+  loadMediaFromStorage,
+  deleteMediaFromStorage,
+  clearAllMediaFromStorage,
+} from './utils/mediaStorage';
+import { Play, Share2 } from 'lucide-react';
 
 export default function App() {
   const [playMode, setPlayMode] = useState<PlayMode>('frame');
@@ -36,10 +43,23 @@ export default function App() {
   const [isGalleryOpen, setIsGalleryOpen] = useState<boolean>(false);
   const [isTutorialOpen, setIsTutorialOpen] = useState<boolean>(false);
 
+  // Sharing state across platforms
+  const [shareMediaItem, setShareMediaItem] = useState<CapturedMedia | null>(null);
+  const [isShareModalOpen, setIsShareModalOpen] = useState<boolean>(false);
+
   // References to trigger snap, record, and flower clearing
   const triggerSnapRef = useRef<(() => void) | null>(null);
   const triggerRecordRef = useRef<(() => void) | null>(null);
   const onClearFlowersRef = useRef<(() => void) | null>(null);
+
+  // Load persistently stored media on app mount
+  useEffect(() => {
+    loadMediaFromStorage().then((saved) => {
+      if (saved && saved.length > 0) {
+        setCapturedMedia(saved);
+      }
+    });
+  }, []);
 
   // Status callback from camera solver
   const handleStatusChange = useCallback(
@@ -65,7 +85,7 @@ export default function App() {
     setCurrentPaletteIndex(nextPal);
   }, []);
 
-  // Handle new captured photo or video
+  // Handle new captured photo or video: save to IndexedDB & trigger Instant Share Modal
   const handleMediaCaptured = useCallback(
     (blob: Blob, type: 'photo' | 'video', duration?: number) => {
       const url = URL.createObjectURL(blob);
@@ -85,13 +105,34 @@ export default function App() {
         duration,
       };
 
+      // Store permanently in IndexedDB so media persists across reloads/sessions
+      saveMediaToStorage(newMedia);
+
       setCapturedMedia((prev) => [newMedia, ...prev]);
+
+      // Automatically open the Share Modal so media can be immediately shared across platforms
+      setShareMediaItem(newMedia);
+      setIsShareModalOpen(true);
     },
     []
   );
 
+  // Download media helper with matching MIME and extension
+  const handleDownloadMedia = useCallback((item: CapturedMedia) => {
+    const a = document.createElement('a');
+    a.href = item.url;
+    const isMp4 = item.blob.type.includes('mp4');
+    const isPng = item.blob.type === 'image/png';
+    const ext = item.type === 'photo' ? (isPng ? 'png' : 'jpg') : (isMp4 ? 'mp4' : 'webm');
+    a.download = `finger-frame-${item.timestamp}.${ext}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }, []);
+
   // Delete an item
   const handleDeleteItem = useCallback((id: string) => {
+    deleteMediaFromStorage(id);
     setCapturedMedia((prev) => {
       const item = prev.find((m) => m.id === id);
       if (item) {
@@ -103,7 +144,8 @@ export default function App() {
 
   // Clear all items
   const handleClearAll = useCallback(() => {
-    if (window.confirm('Delete all captured photos and videos?')) {
+    if (window.confirm('Delete all captured photos and videos from storage?')) {
+      clearAllMediaFromStorage();
       capturedMedia.forEach((m) => URL.revokeObjectURL(m.url));
       setCapturedMedia([]);
     }
@@ -139,8 +181,8 @@ export default function App() {
   const currentPalette = PALETTES[currentPaletteIndex] || PALETTES[0];
 
   return (
-    <div className="flex flex-col h-screen h-[100dvh] w-full bg-[#0b0a10] text-[#f3f0ff] overflow-hidden">
-      {/* Top Header */}
+    <div className="flex flex-col h-screen h-[100dvh] w-screen bg-[#09080f] text-neutral-100 overflow-hidden font-sans">
+      {/* Top Header & Status Bar */}
       <Header
         status={gestureStatus}
         statusText={statusText}
@@ -241,41 +283,71 @@ export default function App() {
                 {capturedMedia.slice(0, 5).map((item) => (
                   <div
                     key={item.id}
-                    onClick={() => setIsGalleryOpen(true)}
                     className="relative w-12 h-9 rounded-lg overflow-hidden border border-purple-700/50 hover:border-cyan-400 shrink-0 cursor-pointer shadow-sm group"
                   >
-                    {item.type === 'photo' ? (
-                      <img
-                        src={item.url}
-                        alt="Thumbnail"
-                        className="w-full h-full object-cover"
-                      />
-                    ) : (
-                      <div className="relative w-full h-full bg-black">
-                        <video
+                    <div
+                      onClick={() => {
+                        setShareMediaItem(item);
+                        setIsShareModalOpen(true);
+                      }}
+                      className="w-full h-full"
+                    >
+                      {item.type === 'photo' ? (
+                        <img
                           src={item.url}
+                          alt="Thumbnail"
                           className="w-full h-full object-cover"
-                          muted
                         />
-                        <div className="absolute inset-0 flex items-center justify-center bg-black/40">
-                          <Play className="w-3 h-3 text-white fill-white" />
+                      ) : (
+                        <div className="relative w-full h-full bg-black">
+                          <video
+                            src={item.url}
+                            className="w-full h-full object-cover"
+                            muted
+                          />
+                          <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+                            <Play className="w-3 h-3 text-white fill-white" />
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )}
+                    </div>
+
+                    {/* Quick share button overlay on thumbnail */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShareMediaItem(item);
+                        setIsShareModalOpen(true);
+                      }}
+                      title="Share across platforms"
+                      className="absolute bottom-0 right-0 p-1 bg-black/80 text-cyan-300 hover:text-white rounded-tl opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                    >
+                      <Share2 className="w-2.5 h-2.5" />
+                    </button>
                   </div>
                 ))}
               </div>
 
-              <button
-                onClick={() => setIsGalleryOpen(true)}
-                className="text-xs font-bold text-cyan-400 hover:text-cyan-300 shrink-0 pl-2 underline decoration-cyan-500/40"
-              >
-                View all ({capturedMedia.length})
-              </button>
+              <div className="flex items-center gap-2 shrink-0 pl-2">
+                <button
+                  onClick={() => setIsGalleryOpen(true)}
+                  className="text-xs font-bold text-cyan-400 hover:text-cyan-300 underline decoration-cyan-500/40 cursor-pointer"
+                >
+                  View all ({capturedMedia.length})
+                </button>
+              </div>
             </div>
           )}
         </div>
       </main>
+
+      {/* Multi-Platform Share & Save Modal */}
+      <ShareModal
+        media={shareMediaItem}
+        isOpen={isShareModalOpen}
+        onClose={() => setIsShareModalOpen(false)}
+        onDownload={handleDownloadMedia}
+      />
 
       {/* Fullscreen Captures Gallery Drawer */}
       <GalleryDrawer
@@ -284,6 +356,10 @@ export default function App() {
         onClearAll={handleClearAll}
         isOpen={isGalleryOpen}
         onClose={() => setIsGalleryOpen(false)}
+        onShareItem={(item) => {
+          setShareMediaItem(item);
+          setIsShareModalOpen(true);
+        }}
       />
 
       {/* How to Play / Gesture Guide Modal */}

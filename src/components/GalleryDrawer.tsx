@@ -19,6 +19,7 @@ interface GalleryDrawerProps {
   onClearAll: () => void;
   isOpen: boolean;
   onClose: () => void;
+  onShareItem?: (item: CapturedMedia) => void;
 }
 
 export const GalleryDrawer: React.FC<GalleryDrawerProps> = ({
@@ -27,6 +28,7 @@ export const GalleryDrawer: React.FC<GalleryDrawerProps> = ({
   onClearAll,
   isOpen,
   onClose,
+  onShareItem,
 }) => {
   const [selectedItemIndex, setSelectedItemIndex] = useState<number | null>(null);
 
@@ -38,7 +40,9 @@ export const GalleryDrawer: React.FC<GalleryDrawerProps> = ({
     e?.stopPropagation();
     const a = document.createElement('a');
     a.href = item.url;
-    const ext = item.type === 'photo' ? 'png' : item.blob.type.includes('mp4') ? 'mp4' : 'webm';
+    const isMp4 = item.blob.type.includes('mp4');
+    const isPng = item.blob.type === 'image/png';
+    const ext = item.type === 'photo' ? (isPng ? 'png' : 'jpg') : (isMp4 ? 'mp4' : 'webm');
     a.download = `finger-frame-${item.timestamp}.${ext}`;
     document.body.appendChild(a);
     a.click();
@@ -47,9 +51,17 @@ export const GalleryDrawer: React.FC<GalleryDrawerProps> = ({
 
   const handleShare = async (item: CapturedMedia, e?: React.MouseEvent) => {
     e?.stopPropagation();
-    const ext = item.type === 'photo' ? 'png' : 'webm';
+    if (onShareItem) {
+      onShareItem(item);
+      return;
+    }
+
+    const isMp4 = item.blob.type.includes('mp4');
+    const isPng = item.blob.type === 'image/png';
+    const ext = item.type === 'photo' ? (isPng ? 'png' : 'jpg') : (isMp4 ? 'mp4' : 'webm');
+    const mime = item.type === 'photo' ? (isPng ? 'image/png' : 'image/jpeg') : (isMp4 ? 'video/mp4' : 'video/webm');
     const file = new File([item.blob], `finger-frame-${item.timestamp}.${ext}`, {
-      type: item.blob.type,
+      type: mime,
     });
 
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -57,10 +69,8 @@ export const GalleryDrawer: React.FC<GalleryDrawerProps> = ({
         await navigator.share({
           files: [file],
           title: 'Finger Frame Capture',
-          text: 'Captured using Finger Frame gesture camera!',
         });
       } catch {
-        // Share cancelled or failed, fallback to download
         downloadMedia(item);
       }
     } else {
@@ -168,6 +178,13 @@ export const GalleryDrawer: React.FC<GalleryDrawerProps> = ({
                       {item.formattedDate}
                     </span>
                     <div className="flex items-center gap-1">
+                      <button
+                        onClick={(e) => handleShare(item, e)}
+                        title="Share Across Platforms"
+                        className="p-1 rounded bg-black/60 text-purple-300 hover:text-white hover:bg-purple-600 transition-colors"
+                      >
+                        <Share2 className="w-3.5 h-3.5" />
+                      </button>
                       <button
                         onClick={(e) => downloadMedia(item, e)}
                         title="Download"

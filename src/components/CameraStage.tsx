@@ -1402,14 +1402,29 @@ export const CameraStage: React.FC<CameraStageProps> = ({
         }
       }
 
-      let mimeType = 'video/webm;codecs=vp9';
-      if (!MediaRecorder.isTypeSupported(mimeType)) {
-        mimeType = 'video/webm';
+      // Prefer high-compatibility MP4/H264 format first for WhatsApp, Instagram, and mobile apps
+      const preferredMimeTypes = [
+        'video/mp4;codecs=avc1,mp4a.40.2',
+        'video/mp4;codecs=avc1',
+        'video/mp4;codecs=h264',
+        'video/mp4',
+        'video/webm;codecs=h264',
+        'video/webm;codecs=vp8',
+        'video/webm',
+      ];
+
+      let mimeType = 'video/webm';
+      for (const t of preferredMimeTypes) {
+        if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(t)) {
+          mimeType = t;
+          break;
+        }
       }
 
+      // 2 Mbps optimal for social video compression & mobile memory limits
       const mediaRecorder = new MediaRecorder(canvasStream, {
         mimeType,
-        videoBitsPerSecond: 3000000,
+        videoBitsPerSecond: 2000000,
       });
 
       recordedChunksRef.current = [];
@@ -1422,7 +1437,9 @@ export const CameraStage: React.FC<CameraStageProps> = ({
 
       mediaRecorder.onstop = () => {
         const durationSec = Math.round((Date.now() - recordStartTimeRef.current) / 1000);
-        const blob = new Blob(recordedChunksRef.current, { type: mimeType });
+        // Base MIME type without codec parameter so mobile file scanners recognize it immediately
+        const baseMime = mimeType.includes('mp4') ? 'video/mp4' : 'video/webm';
+        const blob = new Blob(recordedChunksRef.current, { type: baseMime });
         onMediaCaptured(blob, 'video', durationSec);
 
         if (micStreamRef.current) {
