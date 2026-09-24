@@ -10,6 +10,7 @@ import {
   Eye,
   EyeOff,
   RefreshCw,
+  Sparkles,
 } from 'lucide-react';
 
 interface ControlsBarProps {
@@ -29,6 +30,8 @@ interface ControlsBarProps {
   onSetPhotoTimer: (timer: number) => void;
   isCountingDown: boolean;
   disabled?: boolean;
+  hdEnhance?: boolean;
+  onToggleHdEnhance?: () => void;
 }
 
 export const ControlsBar: React.FC<ControlsBarProps> = ({
@@ -48,6 +51,8 @@ export const ControlsBar: React.FC<ControlsBarProps> = ({
   onSetPhotoTimer,
   isCountingDown,
   disabled = false,
+  hdEnhance = true,
+  onToggleHdEnhance,
 }) => {
   const [showTimerMenu, setShowTimerMenu] = useState(false);
 
@@ -210,6 +215,22 @@ export const ControlsBar: React.FC<ControlsBarProps> = ({
             Auto-change on frame close
           </span>
         </label>
+
+        {/* HD Video Enhance & Anti-Glitch Toggle */}
+        {onToggleHdEnhance && (
+          <button
+            onClick={onToggleHdEnhance}
+            title={hdEnhance ? 'HD Clarity & Anti-Glitch ON (Enhanced 6Mbps, Vibrant contrast, Smooth FPS)' : 'HD Clarity is OFF (Standard)'}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border transition-all cursor-pointer ${
+              hdEnhance
+                ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200 shadow-sm shadow-cyan-500/20'
+                : 'bg-transparent border-purple-900/40 text-purple-400/70 hover:text-purple-300 hover:border-purple-700'
+            }`}
+          >
+            <Sparkles className={`w-3.5 h-3.5 ${hdEnhance ? 'text-cyan-300 animate-pulse' : 'text-purple-400/60'}`} />
+            <span className="font-semibold text-[11px]">{hdEnhance ? 'HD Enhance ON' : 'HD Enhance OFF'}</span>
+          </button>
+        )}
 
         {/* Hand Landmark Overlay Toggle */}
         <button

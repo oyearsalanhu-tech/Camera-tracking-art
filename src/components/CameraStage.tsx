@@ -49,6 +49,7 @@ interface CameraStageProps {
   triggerSnapRef: React.MutableRefObject<(() => void) | null>;
   triggerRecordRef: React.MutableRefObject<(() => void) | null>;
   onClearFlowersRef?: React.MutableRefObject<(() => void) | null>;
+  hdEnhance?: boolean;
 }
 
 // Compute line segment intersection
@@ -64,6 +65,19 @@ function getLineIntersection(p1: Point, p2: Point, p3: Point, p4: Point): Point 
     };
   }
   return null;
+}
+
+// Adaptive Exponential Moving Average (EMA) to eliminate landmark flutter & jitter
+function smoothPoint(prev: Point | undefined, target: Point): Point {
+  if (!prev) return { x: target.x, y: target.y };
+  const d = Math.hypot(target.x - prev.x, target.y - prev.y);
+  // Instantly snap on rapid movements
+  if (d > 50) return { x: target.x, y: target.y };
+  const alpha = Math.min(0.9, Math.max(0.45, d / 20));
+  return {
+    x: prev.x + (target.x - prev.x) * alpha,
+    y: prev.y + (target.y - prev.y) * alpha,
+  };
 }
 
 export const CameraStage: React.FC<CameraStageProps> = ({
@@ -87,6 +101,7 @@ export const CameraStage: React.FC<CameraStageProps> = ({
   triggerSnapRef,
   triggerRecordRef,
   onClearFlowersRef,
+  hdEnhance = true,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -119,6 +134,14 @@ export const CameraStage: React.FC<CameraStageProps> = ({
   const fpsRef = useRef<number>(60);
   const lastFrameTimeRef = useRef<number>(performance.now());
 
+  // Filtered fingertip memory to eliminate jitter
+  const smoothedFingersRef = useRef<{
+    leftIndex?: Point;
+    leftThumb?: Point;
+    rightIndex?: Point;
+    rightThumb?: Point;
+  }>({});
+
   // Tracked fingertips exclusively: Left Index, Left Thumb, Right Index, Right Thumb
   const trackedFingersRef = useRef<{
     leftIndex?: Point;
@@ -133,6 +156,9 @@ export const CameraStage: React.FC<CameraStageProps> = ({
   }>({
     condition: 'none',
   });
+
+  const hdEnhanceRef = useRef(hdEnhance);
+  hdEnhanceRef.current = hdEnhance;
 
   // Synchronized refs
   const playModeRef = useRef(playMode);
@@ -177,24 +203,36 @@ export const CameraStage: React.FC<CameraStageProps> = ({
     send: (data: { image: HTMLVideoElement }) => Promise<void>;
   } | null>(null);
 
+  // Helper to set closed state with audio feedback (declared before processHandResults)
+  const setClosedState = (closed: boolean, status: GestureStatus, text: string) => {
+    if (closed && !isClosedRef.current) {
+      playFrameLockSound();
+      if (autoCycleRef.current && onCycleNextRef.current) {
+        onCycleNextRef.current();
+      }
+    }
+    isClosedRef.current = closed;
+    onStatusChange(status, text, closed);
+  };
+
   useEffect(() => {
     let hands: any = null;
     const initHands = () => {
       if (typeof window !== 'undefined' && (window as any).Hands) {
         try {
           hands = new (window as any).Hands({
-            locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+            locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`,
           });
 
           hands.setOptions({
             maxNumHands: 2,
             modelComplexity: 1,
-            minDetectionConfidence: 0.55,
-            minTrackingConfidence: 0.55,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5,
           });
 
           hands.onResults((results: MediaPipeHandsResults) => {
-            if (results.multiHandLandmarks) {
+            if (results && results.multiHandLandmarks) {
               lastHandsRef.current = results.multiHandLandmarks;
             } else {
               lastHandsRef.current = [];
@@ -244,6 +282,7 @@ export const CameraStage: React.FC<CameraStageProps> = ({
     const mode = playModeRef.current;
 
     if (hands.length === 0) {
+      smoothedFingersRef.current = {};
       missingRef.current++;
       if (missingRef.current > 6) {
         if (mode === 'frame') {
@@ -280,10 +319,23 @@ export const CameraStage: React.FC<CameraStageProps> = ({
         const rightHand = h0x < h1x ? h1 : h0;
 
         // ONLY FOCUS ON FIRST FINGER (Index Tip 8) AND THUMB FINGER (Thumb Tip 4)
-        const lIndex = P(leftHand[8]);
-        const lThumb = P(leftHand[4]);
-        const rIndex = P(rightHand[8]);
-        const rThumb = P(rightHand[4]);
+        // With adaptive jitter smoothing for rock-solid stability
+        const rawLIndex = P(leftHand[8]);
+        const rawLThumb = P(leftHand[4]);
+        const rawRIndex = P(rightHand[8]);
+        const rawRThumb = P(rightHand[4]);
+
+        const lIndex = smoothPoint(smoothedFingersRef.current.leftIndex, rawLIndex);
+        const lThumb = smoothPoint(smoothedFingersRef.current.leftThumb, rawLThumb);
+        const rIndex = smoothPoint(smoothedFingersRef.current.rightIndex, rawRIndex);
+        const rThumb = smoothPoint(smoothedFingersRef.current.rightThumb, rawRThumb);
+
+        smoothedFingersRef.current = {
+          leftIndex: lIndex,
+          leftThumb: lThumb,
+          rightIndex: rIndex,
+          rightThumb: rThumb,
+        };
 
         // Hand orientation check:
         // A hand is upside down if the index finger is pointing down (higher Y coordinate than thumb or wrist)
@@ -486,8 +538,13 @@ export const CameraStage: React.FC<CameraStageProps> = ({
       // CASE B: Single Hand Viewfinder (Single L-pose)
       if (hands.length === 1) {
         const h = hands[0];
-        const iTip = P(h[8]); // index tip (first finger)
-        const tTip = P(h[4]); // thumb tip (thumb finger)
+        const rawITip = P(h[8]); // index tip (first finger)
+        const rawTTip = P(h[4]); // thumb tip (thumb finger)
+        const iTip = smoothPoint(smoothedFingersRef.current.leftIndex, rawITip);
+        const tTip = smoothPoint(smoothedFingersRef.current.leftThumb, rawTTip);
+        smoothedFingersRef.current.leftIndex = iTip;
+        smoothedFingersRef.current.leftThumb = tTip;
+
         const corner = mid(P(h[2]), P(h[5])); // corner of L
         const span = dist(iTip, tTip);
 
@@ -648,18 +705,6 @@ export const CameraStage: React.FC<CameraStageProps> = ({
 
     if (pType === 'flower') playBloomSound();
     else playSparkleSound();
-  };
-
-  // Helper to set closed state with audio feedback
-  const setClosedState = (closed: boolean, status: GestureStatus, text: string) => {
-    if (closed && !isClosedRef.current) {
-      playFrameLockSound();
-      if (autoCycleRef.current && onCycleNextRef.current) {
-        onCycleNextRef.current();
-      }
-    }
-    isClosedRef.current = closed;
-    onStatusChange(status, text, closed);
   };
 
   // Drawing routines for particles
@@ -935,6 +980,10 @@ export const CameraStage: React.FC<CameraStageProps> = ({
         return;
       }
 
+      // Maximize canvas rendering fidelity
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+
       const w = canvas.width;
       const h = canvas.height;
       const isUserFacing = facingRef.current === 'user';
@@ -946,7 +995,7 @@ export const CameraStage: React.FC<CameraStageProps> = ({
       const condition = conditionRef.current;
       const tf = trackedFingersRef.current;
 
-      // 1. Draw Camera video (mirrored for selfie)
+      // 1. Draw Camera video (mirrored for selfie) with HD Clarity & Enhancement
       ctx.clearRect(0, 0, w, h);
       ctx.save();
       if (isUserFacing) {
@@ -956,7 +1005,14 @@ export const CameraStage: React.FC<CameraStageProps> = ({
 
       // If style is Color Pop Spotlight, desaturate the background
       if (style.id === 'color-pop' && isClosed && quad) {
-        ctx.filter = 'grayscale(100%) brightness(80%)';
+        ctx.filter = hdEnhanceRef.current
+          ? 'grayscale(100%) brightness(85%) contrast(1.05)'
+          : 'grayscale(100%) brightness(80%)';
+      } else if (hdEnhanceRef.current) {
+        // Studio-grade enhancement: improved dynamic range, rich natural vibrance, crisp contrast
+        ctx.filter = 'contrast(1.06) saturate(1.10) brightness(1.02)';
+      } else {
+        ctx.filter = 'none';
       }
       ctx.drawImage(video, 0, 0, w, h);
       ctx.filter = 'none';
@@ -1262,14 +1318,26 @@ export const CameraStage: React.FC<CameraStageProps> = ({
           streamRef.current.getTracks().forEach((t) => t.stop());
         }
 
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: facing,
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
-          audio: false,
-        });
+        let stream: MediaStream;
+        try {
+          // Request high-definition stream with ideal resolution (avoiding overconstrained min limits)
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: facing,
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+            },
+            audio: false,
+          });
+        } catch {
+          // Graceful device fallback
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: facing,
+            },
+            audio: false,
+          });
+        }
 
         if (!active) {
           stream.getTracks().forEach((t) => t.stop());
@@ -1303,7 +1371,8 @@ export const CameraStage: React.FC<CameraStageProps> = ({
     };
   }, [facing, onStatusChange]);
 
-  // Request hand inference frames
+  // Request hand inference frames directly from video stream
+  // Guarantees reliable MediaPipe GPU execution and never hangs the busy lock
   useEffect(() => {
     let animId: number;
 
@@ -1315,7 +1384,9 @@ export const CameraStage: React.FC<CameraStageProps> = ({
         busyRef.current = true;
         try {
           await hands.send({ image: video });
-        } catch {
+        } catch (err) {
+          console.warn('MediaPipe hands send error:', err);
+        } finally {
           busyRef.current = false;
         }
       }
@@ -1356,7 +1427,7 @@ export const CameraStage: React.FC<CameraStageProps> = ({
       if (blob) {
         onMediaCaptured(blob, 'photo');
       }
-    }, 'image/jpeg', 0.95);
+    }, 'image/jpeg', 0.98);
   }, [onMediaCaptured]);
 
   const triggerSnap = useCallback(() => {
@@ -1390,11 +1461,23 @@ export const CameraStage: React.FC<CameraStageProps> = ({
     if (!canvas) return;
 
     try {
-      const canvasStream = canvas.captureStream(30);
+      // Capture stream at 60 FPS (or 30 FPS fallback)
+      let canvasStream: MediaStream;
+      try {
+        canvasStream = canvas.captureStream(60);
+      } catch {
+        canvasStream = canvas.captureStream(30);
+      }
 
       if (micEnabled) {
         try {
-          const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+          });
           micStreamRef.current = micStream;
           micStream.getAudioTracks().forEach((track) => canvasStream.addTrack(track));
         } catch (e) {
@@ -1421,10 +1504,11 @@ export const CameraStage: React.FC<CameraStageProps> = ({
         }
       }
 
-      // 2 Mbps optimal for social video compression & mobile memory limits
+      // 6 Mbps enhanced high-definition bitrate for crisp, artifact-free, vibrant video
       const mediaRecorder = new MediaRecorder(canvasStream, {
         mimeType,
-        videoBitsPerSecond: 2000000,
+        videoBitsPerSecond: 6000000,
+        audioBitsPerSecond: 128000,
       });
 
       recordedChunksRef.current = [];

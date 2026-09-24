@@ -35,6 +35,7 @@ export default function App() {
   const [micEnabled, setMicEnabled] = useState<boolean>(true);
   const [photoTimer, setPhotoTimer] = useState<number>(0);
   const [soundOn, setSoundOn] = useState<boolean>(true);
+  const [hdEnhance, setHdEnhance] = useState<boolean>(true);
 
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [recordingTime, setRecordingTime] = useState<number>(0);
@@ -218,6 +219,7 @@ export default function App() {
           triggerSnapRef={triggerSnapRef}
           triggerRecordRef={triggerRecordRef}
           onClearFlowersRef={onClearFlowersRef}
+          hdEnhance={hdEnhance}
         />
 
         {/* Bottom Interactive Dashboard */}
@@ -271,6 +273,8 @@ export default function App() {
             photoTimer={photoTimer}
             onSetPhotoTimer={setPhotoTimer}
             isCountingDown={false}
+            hdEnhance={hdEnhance}
+            onToggleHdEnhance={() => setHdEnhance((prev) => !prev)}
           />
 
           {/* Quick Recent Captures Filmstrip (when gallery is closed) */}
